@@ -1,10 +1,21 @@
 # The Not-So-Complete (But Trying) LLM Engineer's Handbook 📘
 
+[![Website](https://img.shields.io/badge/Website-aisystems.pages.dev-4ade80)](https://aisystems.pages.dev)
+[![GitHub Pages](https://img.shields.io/badge/GitHub%20Pages-llm--handbook-60a5fa)](https://harjotsinghh.github.io/llm-handbook/)
+[![Educational Resource](https://img.shields.io/badge/Purpose-educational-a78bfa)](https://aisystems.pages.dev)
+
 Welcome to **The Not-So-Complete (But Trying) LLM Engineer's Handbook**, a practitioner's guide covering the full Large Language Model engineering stack — from pretraining architecture to high-throughput deployment.
 
-![Handbook Preview](./preview.png) *(Add a screenshot here later)*
-
 > **Disclaimer:** This project is purely for educational purposes. The data and content have been curated using deep research from AI platforms like Google Gemini and ChatGPT. It is designed to act as a structured learning path. Please verify the information independently before using it in production systems.
+
+---
+
+## Website
+
+You can access the handbook here:
+
+1. [https://aisystems.pages.dev](https://aisystems.pages.dev)
+2. [https://harjotsinghh.github.io/llm-handbook/](https://harjotsinghh.github.io/llm-handbook/)
 
 ---
 
@@ -61,8 +72,21 @@ We have set up two autonomous workflows specifically for editing this content us
 
 ---
 
+## Contributing
+
+This handbook is an educational resource curated with AI-assisted research and ongoing manual review. If you spot something outdated, unclear, broken, or missing, feel free to open an issue or submit a pull request.
+
+Helpful contributions include:
+
+- fixing inaccuracies or broken links
+- improving explanations and readability
+- adding missing references or sections
+- polishing the UI, responsiveness, or accessibility
+
+---
+
 <div align="center">
-  <p>Made with &hearts; using Vite & React</p>
+  <p>Built with Vite &amp; React</p>
   <p>
     <a href="https://github.com/Harjotsinghh">GitHub</a> | 
     <a href="https://www.linkedin.com/in/harjotsi/">LinkedIn</a>

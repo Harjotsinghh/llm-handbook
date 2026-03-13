@@ -21,6 +21,7 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mainRef = useRef<HTMLElement>(null);
+  const defaultChapterId = index?.chapters[0]?.id || "";
 
   // 1. Load the lightweight index on mount
   useEffect(() => {
@@ -61,17 +62,32 @@ export default function App() {
   // 3. Load active chapter whenever it changes + update URL hash
   useEffect(() => {
     if (!index || !activeChapterId) return;
-    // Update URL hash without scroll effect
-    window.history.replaceState(null, "", `#${activeChapterId}`);
+    // Keep the default landing chapter on a clean URL and hash-link the rest.
+    const cleanUrl = `${window.location.pathname}${window.location.search}`;
+    window.history.replaceState(
+      null,
+      "",
+      activeChapterId === defaultChapterId ? cleanUrl : `#${activeChapterId}`
+    );
     const entry = index.chapters.find((c) => c.id === activeChapterId);
     if (entry) loadChapter(entry);
-  }, [index, activeChapterId, loadChapter]);
+  }, [index, activeChapterId, defaultChapterId, loadChapter]);
 
   // Listen to hash changes (e.g. clicking a link to #ch5 in the TOC)
   useEffect(() => {
     const handleHashChange = () => {
       const hashId = getHashChapterId();
-      if (index && hashId && hashId !== activeChapterId) {
+      if (!index) return;
+
+      if (!hashId) {
+        if (activeChapterId !== defaultChapterId && defaultChapterId) {
+          setActiveChapterId(defaultChapterId);
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        }
+        return;
+      }
+
+      if (hashId !== activeChapterId) {
         const validHash = index.chapters.some((c) => c.id === hashId);
         if (validHash) {
           setActiveChapterId(hashId);
@@ -81,7 +97,7 @@ export default function App() {
     };
     window.addEventListener("hashchange", handleHashChange);
     return () => window.removeEventListener("hashchange", handleHashChange);
-  }, [index, activeChapterId]);
+  }, [index, activeChapterId, defaultChapterId]);
 
   useEffect(() => {
     const isCompactViewport = window.innerWidth <= 900;
