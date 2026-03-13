@@ -1,0 +1,794 @@
+{
+  "id": "ch3",
+  "title": "3. Continuous Pretraining",
+  "subtitle": "Domain Adaptation, Data Engineering & Distributed Training",
+  "icon": "🔄",
+  "color": "#10b981",
+  "sections": [
+    {
+      "type": "intro",
+      "heading": "Continuous Pretraining for Domain Adaptation",
+      "body": "Continuous Pretraining (CPT) represents a sophisticated midpoint in the lifecycle of large language model (LLM) development, positioned between initial foundation training and supervised alignment. While foundational models are characterized by their broad mastery of statistical language patterns from general-purpose corpora, they frequently lack the high-resolution world models necessary for technical verticals. CPT is the engineering response to this deficiency, allowing organizations to initialize weights from a state-of-the-art generalist and continue the autoregressive objective on specialized datasets. [1] The following analysis provides an exhaustive engineering decomposition of the mathematical, architectural, and hardware-level considerations required to execute CPT at the 70B parameter scale and beyond."
+    },
+    {
+      "type": "section",
+      "id": "s3-workflow",
+      "heading": "",
+      "blocks": [
+        {
+          "type": "mermaid",
+          "title": "Continuous Pretraining Workflow",
+          "code": "graph LR\n    A[Base LLM] --> B[Collect and Filter Domain Data]\n    B --> C[Tokenize and Preprocess]\n    C --> D[Setup Parallel Training - TP, PP, DP]\n    D --> E[Run Continuous Pretraining]\n    E --> F[Domain-Adapted LLM]\n    F --> G[Optional: Supervised Fine-Tuning]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-1",
+      "heading": "1.1 The Theoretical Engineering Rationale for Domain Adaptation",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The decision to pursue CPT over training from scratch is primarily dictated by the economics of compute and the information-theoretic properties of transfer learning. Initializing with random noise requires the model to learn fundamental concepts—syntax, logic, and basic semantics—which are computationally expensive to re-derive for every new domain. [1] CPT leverages the pre-existing representations in a model like Llama 3 or Mistral, effectively treating the base model as a highly informed prior. The objective then shifts to refining this prior toward a domain-specific posterior distribution. [2]"
+        },
+        {
+          "type": "text",
+          "content": "This process is fundamentally distinct from Supervised Fine-Tuning (SFT). While SFT alters the \"behavioral\" layer to enable instruction following, CPT modifies the internal \"knowledge\" representation by adjusting the weights throughout the entire transformer stack. [2] In sectors such as quantitative finance or clinical medicine, the linguistic distribution—specifically the n-gram frequencies and word-sense disambiguation—differs radically from Common Crawl. For example, the term \"liquid\" in a general context refers to a state of matter, whereas in the financial domain it refers to asset marketability. CPT allows the model's attention mechanisms to recalibrate their query-key relationships to favor the domain-relevant meaning. [2]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-1-1",
+      "heading": "1.1.1 Categorization of Continual Pretraining Strategies",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Practical implementation of CPT typically falls into two distinct operational modes. The first involves infrequent, large-scale updates where the model is exposed to substantial new data and compute, effectively 'versioning' the model for a specific industry. [7] Examples include BloombergGPT and Med-PaLM, where the core weights were significantly specialized for finance and medicine, respectively. [1] The second mode focuses on frequent, sample-level updates targeted at specific information gaps, often referred to as 'knowledge editing'. [7]"
+        },
+        {
+          "type": "text",
+          "content": "A major risk in both scenarios is the 'Plasticity-Stability Dilemma,' where the model becomes so plastic it adapts to new data but loses the stability of its original capabilities—a phenomenon known as **catastrophic forgetting**. [2]"
+        },
+        {
+          "type": "callout",
+          "style": "important",
+          "title": "BloombergGPT's 50/50 Strategy",
+          "content": "BloombergGPT mixed about **50% finance data with 50% general data** and saw the best of both worlds—strong domain performance without losing general capabilities. [5] Simple heuristics like holding out Wikipedia or broad text as part of each epoch are common to 'remind' the model of general knowledge. Mixing 5-15% of original pretraining data into each CPT batch is a widely used replay buffer strategy. [2]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-2",
+      "heading": "2.1 The Mathematics of Causal Language Modeling",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The engineering backbone of continuous pretraining is Causal Language Modeling (CLM). Unlike masked language modeling, CLM is strictly auto-regressive, meaning it only predicts future tokens based on historical context. This aligns the training objective with the inference-time generation process. [1]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-2-1",
+      "heading": "2.1.1 The Objective Function and Probability Distribution",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Given a sequence of tokens $x_1, x_2, \\dots, x_T$, the model attempts to maximize the likelihood of the next token $x_t$ given the previous tokens $x_{<t}$. The joint probability of the sequence is decomposed as:"
+        },
+        {
+          "type": "equation",
+          "label": "Joint Probability",
+          "tex": "P(X) = \\prod_{t=1}^T P(x_t | x_{<t}; \\theta)",
+          "description": "Decomposition of sequence probability into a product of conditional probabilities."
+        },
+        {
+          "type": "text",
+          "content": "During training, this is formulated as minimizing the negative log-likelihood (NLL) over a dataset $\\mathcal{D}$:"
+        },
+        {
+          "type": "equation",
+          "label": "CLM Loss",
+          "tex": "\\mathcal{L}_{CLM} = -\\mathbb{E}_{X \\sim \\mathcal{D}} \\left[ \\sum_{t=1}^{T} \\log P(x_t | x_{<t}; \\theta) \\right]",
+          "description": "The standard Causal Language Modeling objective function."
+        },
+        {
+          "type": "text",
+          "content": "The model produces a vector of logits $z$ for each token in the vocabulary. These are transformed into a probability distribution via the Softmax operation:"
+        },
+        {
+          "type": "equation",
+          "label": "Softmax",
+          "tex": "P(x_t = i) = \\frac{\\exp(z_i / \\tau)}{\\sum_{j=1}^{|V|} \\exp(z_j / \\tau)}",
+          "description": "Transforms raw logits into probabilities."
+        },
+        {
+          "type": "text",
+          "content": "where $|V|$ is the vocabulary size and $\\tau$ is the temperature parameter. [10] In pretraining, $\\tau$ is typically set to 1.0 to preserve the true distribution. Lower values of $\\tau$ sharpen the distribution, making the model more deterministic, while higher values lead to increased entropy and \"flatter\" predictions. [10]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-2-2",
+      "heading": "2.1.2 Gradient Derivation and Backpropagation",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "To understand how weights are adjusted during CPT, one must examine the gradient of the Cross-Entropy loss with respect to the output logits. If $y$ is the one-hot encoded vector of the actual next token, and $\\hat{y}$ is the predicted probability distribution, the loss for a single token $t$ is:"
+        },
+        {
+          "type": "equation",
+          "label": "Token Loss",
+          "tex": "L_t = -\\sum_{i} y_i \\log \\hat{y}_i",
+          "description": "Cross-entropy loss for a single token."
+        },
+        {
+          "type": "text",
+          "content": "The derivative of the loss with respect to the $j$-th logit $z_j$ is given by:"
+        },
+        {
+          "type": "equation",
+          "label": "Logit Gradient",
+          "tex": "\\frac{\\partial L_t}{\\partial z_j} = -\\sum_{i} y_i \\frac{\\partial \\log \\hat{y}_i}{\\partial z_j} = -\\sum_{i} y_i \\frac{1}{\\hat{y}_i} \\frac{\\partial \\hat{y}_i}{\\partial z_j}",
+          "description": "Chain rule applied to the loss function."
+        },
+        {
+          "type": "text",
+          "content": "Using the properties of the Softmax derivative, where $\\frac{\\partial \\hat{y}_i}{\\partial z_j} = \\hat{y}_i (1 - \\hat{y}_j)$ if $i = j$ and $\\frac{\\partial \\hat{y}_i}{\\partial z_j} = -\\hat{y}_i \\hat{y}_j$ if $i \\neq j$, the expression simplifies significantly:"
+        },
+        {
+          "type": "equation",
+          "label": "Simplified Gradient",
+          "tex": "\\frac{\\partial L_t}{\\partial z_j} = \\hat{y}_j - y_j",
+          "description": "The elegant simplification of the cross-entropy gradient."
+        },
+        {
+          "type": "text",
+          "content": "This result demonstrates that the weight updates are directly proportional to the \"surprise\" or error of the prediction. [12] If the model is confident in a wrong token, the gradient is large, forcing significant internal realignment. In the context of CPT, this mechanism is what drives the acquisition of new domain knowledge. [1]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-3",
+      "heading": "3.1 Data Engineering: The FinPile Case Study",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The quality of the domain-specific corpus is the primary predictor of CPT success. The BloombergGPT technical report provides a definitive template for \"FinPile,\" a 363 billion token financial dataset mixed with 345 billion tokens of public data to create a balanced 700B token training stream. [5]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-3-1",
+      "heading": "3.1.1 Dataset Composition and Preparation Methods",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Engineering a domain-specific corpus involves more than simple collection; it requires a rigorous cleansing and deduplication pipeline. Deduplication alone has been shown to reduce verbatim memorization by 10x while maintaining accuracy with fewer iterations. [14] The FinPile dataset utilized a multi-stage approach to ensure factuality and reduce noise [5]:"
+        },
+        {
+          "type": "table",
+          "title": "FinPile Dataset Composition",
+          "headers": [
+            "Category",
+            "Token Count",
+            "Percentage",
+            "Description"
+          ],
+          "rows": [
+            [
+              "Financial Web",
+              "298B",
+              "42.1%",
+              "Scraped financial news and forums"
+            ],
+            [
+              "Company Filings",
+              "14B",
+              "2.0%",
+              "SEC reports and regulatory documents"
+            ],
+            [
+              "Bloomberg News",
+              "38B",
+              "5.4%",
+              "Proprietary news archives (1980-present)"
+            ],
+            [
+              "The Pile",
+              "184B",
+              "26.0%",
+              "General purpose academic/web data"
+            ],
+            [
+              "C4",
+              "138B",
+              "19.5%",
+              "Cleaned version of Common Crawl"
+            ],
+            [
+              "Wikipedia",
+              "24B",
+              "3.4%",
+              "Encyclopedic general knowledge"
+            ]
+          ]
+        },
+        {
+          "type": "text",
+          "content": "The inclusion of SEC filings presented specific challenges due to the removal of tables and figures, which left \"noisy\" residual text. [4] Engineers implemented filters to remove short, non-semantic strings and used keyword-based classifiers to differentiate high-value financial news from general current events. [4]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-3-2",
+      "heading": "3.1.2 Tokenization Engineering: Unigram vs. BPE",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "A critical modeling choice in CPT is whether to retain the base model's tokenizer or rebuild it for the target domain. BloombergGPT opted for a **Unigram model** over the common Byte-Pair Encoding (BPE). [5] While BPE iteratively merges the most frequent pairs of bytes, the Unigram approach starts with a large vocabulary and removes tokens that contribute least to the likelihood of the corpus. [5] This allows the tokenizer to represent specialized terms (e.g., 'EBITDA', 'Amortization') as single tokens, increasing computational efficiency and providing a clearer learning signal to the embedding layer. [2]"
+        },
+        {
+          "type": "callout",
+          "style": "insight",
+          "title": "Unigram Performance Advantage",
+          "content": "Bostrom & Durrett found that Unigram tokenization 'matches or outperforms' BPE in downstream tasks. In one study, Unigram gave up to **~10% better accuracy** on QA benchmarks than BPE when used with similar model training. [5]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-4",
+      "heading": "4.1 The Hardware Wall and VRAM Complexity",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The shift from 7B to 70B parameter models introduces a phase change in hardware requirements. Training a 70B model requires fitting not just the weights, but also gradients, optimizer states, and activations into GPU memory. [1]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-4-1",
+      "heading": "4.1.1 Static Memory Breakdown (The 20-Byte Rule)",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "For a model with $\\Phi$ parameters, the static memory footprint during training with the AdamW optimizer (the industry standard) and mixed-precision (BF16/FP32) is approximately 20 bytes per parameter. [16]"
+        },
+        {
+          "type": "list",
+          "style": "detail",
+          "items": [
+            {
+              "label": "Weights (BF16)",
+              "detail": "2 bytes per parameter ($2\\Phi$). [16]"
+            },
+            {
+              "label": "Master Weights (FP32)",
+              "detail": "4 bytes per parameter ($4\\Phi$). These are required to maintain numerical stability during the weight update. [16]"
+            },
+            {
+              "label": "Gradients (BF16 or FP32)",
+              "detail": "2-4 bytes per parameter ($2\\Phi$ to $4\\Phi$). Most SOTA pipelines use FP32 gradients for stability, though BF16 gradients are increasingly common to save 2 bytes per parameter. [16]"
+            },
+            {
+              "label": "Optimizer States (AdamW)",
+              "detail": "8 bytes per parameter ($8\\Phi$). Adam maintains two moments: $m$ (momentum) and $v$ (variance), both typically stored in FP32. [16]"
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "content": "For a 70B model, $20 \\times 70 \\times 10^9 = 1.4$ TB. Given that an NVIDIA H100 provides 80 GB of VRAM, the static state alone requires at least 18 GPUs, even before accounting for activation memory. [1]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-4-2",
+      "heading": "4.1.2 Dynamic Activation Memory",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Activation memory is the primary bottleneck for long-sequence training. Unlike static states, it scales linearly with batch size $b$ and sequence length $s$. [17] The total activation memory for an $L$-layer Transformer can be approximated by:"
+        },
+        {
+          "type": "equation",
+          "label": "Activation Memory",
+          "tex": "M_{act} \\approx L \\cdot b \\cdot s \\cdot h \\left( 34 + \\frac{5s}{h} \\right)",
+          "description": "Approximate activation memory requirement."
+        },
+        {
+          "type": "text",
+          "content": "where $h$ is the hidden dimension and $a$ is the number of attention heads. [17] The quadratic term $s^2$ represents the attention scores, which balloon significantly as context windows expand to 32k or 128k tokens. [17]"
+        },
+        {
+          "type": "text",
+          "content": "To manage this, engineers use **Selective Activation Recomputation**. Instead of storing all intermediate values, only the \"checkpoints\" (the inputs to each layer) are stored, and others are recomputed during the backward pass. [19] This reduces activation memory to $O(L + bsh)$ bytes at the cost of a 30-40% increase in compute time. [19]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-5",
+      "heading": "5.1 Distributed Architecture: 3D Parallelism",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "To overcome the VRAM wall, engineers implement a hybrid of three parallelism dimensions, orchestrated through frameworks like Megatron-LM or DeepSpeed. [1]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-5-1",
+      "heading": "5.1.1 Tensor Parallelism (TP): Splitting the Weights",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Tensor Parallelism shards individual linear layers across GPUs. It is optimized for intra-node communication (NVLink) because it requires two all-reduce operations per transformer layer. [1] In the Feed-Forward Network (FFN) block:"
+        },
+        {
+          "type": "list",
+          "style": "detail",
+          "items": [
+            {
+              "label": "ColumnParallelLinear",
+              "detail": "Splits the weight matrix $W_1$ by column. Each GPU computes a partial output $Y_1$."
+            },
+            {
+              "label": "RowParallelLinear",
+              "detail": "Splits the second weight matrix $W_2$ by row. It takes the output of the first layer and computes $Y_2$."
+            },
+            {
+              "label": "Synchronization",
+              "detail": "An all-reduce operation sums $Y_2$ across the TP group to reconstruct the full output. [28]"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-5-2",
+      "heading": "5.1.2 Pipeline Parallelism (PP) and the 1F1B Schedule",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Pipeline Parallelism distributes layers across GPUs. If a model has 80 layers and we have 8 GPUs, each GPU holds 10 layers. Data flows sequentially through the \"stages\". [1] To minimize the idle time (the pipeline bubble), the 1F1B (One-Forward-One-Backward) schedule is used. [26]"
+        },
+        {
+          "type": "mermaid",
+          "title": "1F1B Schedule Pipeline",
+          "code": "graph LR\n  subgraph GPU_0_Stage_0\n    F0_0 --> F0_1\n    F0_1 --> B0_0\n    B0_0 --> F0_2\n  end\n  subgraph GPU_1_Stage_1\n    F1_0 --> F1_1\n    F1_1 --> B1_0\n    B1_0 --> F1_2\n  end\n  F0_0 -.-> F1_0\n  F1_0 -.-> B1_0\n  B1_0 -.-> B0_0"
+        },
+        {
+          "type": "text",
+          "content": "The bubble overhead is calculated as:"
+        },
+        {
+          "type": "equation",
+          "label": "Bubble Overhead",
+          "tex": "Bubble\\ Overhead = \\frac{p - 1}{m}",
+          "description": "Calculates the inefficiency introduced by the pipeline bubble."
+        },
+        {
+          "type": "text",
+          "content": "where $p$ is the number of pipeline stages and $m$ is the number of micro-batches. Increasing micro-batches reduces the relative size of the bubble, improving MFU. [31]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-5-3",
+      "heading": "5.1.3 Sequence Parallelism (SP)",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Sequence Parallelism is an enhancement to TP that shards activations along the sequence dimension ($s$) rather than the hidden dimension ($h$). By splitting the sequence length across $TP$ GPUs, the activation memory required for layer normalization and dropout—which are normally not parallelized in standard TP—is reduced by $1/TP$ without adding communication overhead. [26]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-6",
+      "heading": "6.1 ZeRO-3 and FSDP: Fully Sharded Data Parallelism",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "While 3D parallelism provides maximum control, Fully Sharded Data Parallel (FSDP) and DeepSpeed ZeRO-3 offer a more automated, vertically sharded approach that treats the entire cluster as a unified memory pool. [1]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-6-1",
+      "heading": "6.1.1 The Sharding Mechanism",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "FSDP shards the model parameters ($W$), gradients ($G$), and optimizer states ($O$) across $N$ GPUs. At rest, each GPU only stores $1/N$ of each tensor. During the forward pass, FSDP uses an all-gather collective to reconstruct the full parameters for a specific \"FSDP unit\" (typically one or more transformer layers). [18]"
+        },
+        {
+          "type": "list",
+          "style": "detail",
+          "items": [
+            {
+              "label": "Forward Pass",
+              "detail": "all-gather $W$ -> compute -> discard non-local $W$. [18]"
+            },
+            {
+              "label": "Backward Pass",
+              "detail": "all-gather $W$ -> compute gradients $G$ -> reduce-scatter $G$ -> discard $W$. [18]"
+            },
+            {
+              "label": "Optimizer Step",
+              "detail": "Each GPU updates only its shard of $W$ using its local shard of $G$ and $O$. [18]"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-6-2",
+      "heading": "6.1.2 Communication Volume Analysis",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "ZeRO-3/FSDP involves a trade-off: it significantly reduces VRAM but increases communication volume. Compared to standard Distributed Data Parallel (DDP), which has a communication volume of $2\\Phi$ per step, ZeRO-3 requires $3\\Phi$. [35]"
+        },
+        {
+          "type": "table",
+          "title": "Data Parallelism Strategies",
+          "headers": [
+            "Strategy",
+            "Memory per GPU",
+            "Communication Volume",
+            "Communication Collective"
+          ],
+          "rows": [
+            [
+              "DDP",
+              "$2\\Phi + 2\\Phi + K\\Phi$",
+              "$2\\Phi$",
+              "all-reduce"
+            ],
+            [
+              "ZeRO-1",
+              "$2\\Phi + 2\\Phi + \\frac{K\\Phi}{N}$",
+              "$2\\Phi$",
+              "all-reduce"
+            ],
+            [
+              "ZeRO-2",
+              "$2\\Phi + \\frac{2\\Phi}{N} + \\frac{K\\Phi}{N}$",
+              "$2\\Phi$",
+              "reduce-scatter + all-gather"
+            ],
+            [
+              "ZeRO-3",
+              "$\\frac{2\\Phi}{N} + \\frac{2\\Phi}{N} + \\frac{K\\Phi}{N}$",
+              "$1.5 \\times 2\\Phi$",
+              "all-gather + reduce-scatter"
+            ]
+          ]
+        },
+        {
+          "type": "text",
+          "content": "Note: $K$ represents optimizer constant (12 for Adam). [18]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-6-3",
+      "heading": "6.1.3 Implementation Logic: FSDP Wrapping",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Implementing FSDP in PyTorch requires defining a sharding policy. For Transformers, the policy must ensure that sharding occurs at the block level rather than individual linear layers to maintain efficiency. [36]"
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "import torch\nimport torch.distributed as dist\nfrom torch.distributed.fsdp import FullyShardedDataParallel as FSDP\nfrom torch.distributed.fsdp import ShardingStrategy, MixedPrecision, BackwardPrefetch\nfrom torch.distributed.fsdp.wrap import transformer_auto_wrap_policy\n\n# Define the precision policy - BF16 is preferred for modern LLM training\nmixed_precision_policy = MixedPrecision(\n    param_dtype=torch.bfloat16,\n    reduce_dtype=torch.bfloat16,\n    buffer_dtype=torch.bfloat16,\n)\n\n# Define the auto-wrap policy for a standard Transformer block\n# This ensures each layer is its own FSDP unit for gather/discard cycles\nwrapping_policy = transformer_auto_wrap_policy(model, {LlamaDecoderLayer})\n\n# Wrap the model\nsharded_model = FSDP(\n    model,\n    auto_wrap_policy=wrapping_policy,\n    sharding_strategy=ShardingStrategy.FULL_SHARD, # Equivalent to ZeRO-3\n    mixed_precision=mixed_precision_policy,\n    backward_prefetch=BackwardPrefetch.BACKWARD_PRE, # Prefetch next layer during backward\n    limit_all_gathers=True, # Throttles communication to prevent OOM\n    device_id=torch.cuda.current_device()\n)"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-7",
+      "heading": "7.1 Learning Rate Optimization for Continual Pretraining",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "In the context of CPT, the learning rate (LR) schedule is a primary factor in preventing the \"shock\" to pretrained weights that causes catastrophic forgetting."
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-7-1",
+      "heading": "7.1.1 The Rewarming Strategy",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Unlike training from scratch, where the LR starts at zero and warms up to a high peak, CPT requires **Rewarming**. This technique starts the LR at a value near the final LR of the base model's pretraining phase and gradually increases it to a new, lower peak. [2]"
+        },
+        {
+          "type": "text",
+          "content": "For a model with an original peak LR of $\\eta_0$, the CPT peak is often set to 5-10% of that value ($0.05\\eta_0$ to $0.1\\eta_0$). [45] The warmup period typically covers 1% of the training dataset size. [45]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-7-2",
+      "heading": "7.1.2 Cosine Decay with Re-warming Formula",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The learning rate $\\eta_t$ at step $t$ is calculated using a warmup phase followed by a cosine decay:"
+        },
+        {
+          "type": "equation",
+          "label": "Cosine Decay with Rewarming",
+          "tex": "\\eta_t = \\begin{cases} \\frac{t}{T_{warmup}} \\cdot \\eta_{peak} & \\text{if } t \\le T_{warmup} \\\\ \\eta_{min} + 0.5(\\eta_{peak} - \\eta_{min}) \\left( 1 + \\cos\\left( \\frac{\\pi (t - T_{warmup})}{T_{total} - T_{warmup}} \\right) \\right) & \\text{if } t > T_{warmup} \\end{cases}",
+          "description": "Learning rate schedule for Continual Pretraining."
+        },
+        {
+          "type": "text",
+          "content": "State-of-the-art results from the 'Pythia' study suggest that avoiding re-warming entirely and using a constant, low LR may be more effective for limited compute budgets (under 50B tokens), as re-warming can introduce excessive noise into stable weights. [46] However, for large-scale domain adaptation (BloombergGPT scale), re-warming and re-decaying remains the gold standard. [43]"
+        },
+        {
+          "type": "callout",
+          "style": "insight",
+          "title": "Gradient Accumulation in CPT",
+          "content": "Since domain corpora are often smaller, we may need to accumulate many micro-batches (e.g. **100-1000**) to reach an effective batch of millions of tokens. The global batch size is typically kept fixed (e.g. **1M tokens**) as TP/PP degrees change, to maintain stable LR scaling."
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-zeropp",
+      "heading": "6.1.3 ZeroPP: TP-Free Methodology",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Recent research (ZeroPP) demonstrates that a well-scheduled **PP + ZeRO-3 pipeline can outperform TP + PP** in practice. [50] ZeroPP eliminates tensor parallelism entirely, reducing per-layer all-reduce communication while maintaining equivalent throughput. This is particularly valuable for inter-node training where NVLink is not available."
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-8",
+      "heading": "8.1 Efficiency Analysis: Memory Bandwidth and Throughput",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The engineering choice between 3D Parallelism and FSDP is ultimately a performance trade-off between memory capacity and execution throughput."
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-8-1",
+      "heading": "8.1.1 Model FLOPs Utilization (MFU)",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "MFU is the core metric for evaluating training efficiency. It is defined as:"
+        },
+        {
+          "type": "equation",
+          "label": "MFU",
+          "tex": "MFU = \\frac{6 \\cdot N \\cdot \\text{tokens per second}}{\\text{Peak Theoretical FLOP/s}}",
+          "description": "Calculation of Model FLOPs Utilization."
+        },
+        {
+          "type": "text",
+          "content": "where $N$ is parameter count. For an H100 GPU, a healthy MFU for 70B models is between 45% and 55%. [19]"
+        },
+        {
+          "type": "text",
+          "content": "TP-based models (Megatron-LM) often achieve higher MFU than FSDP in high-bandwidth environments (InfiniBand/NVLink) because they avoid the repeated all-gather of parameters. [27] However, FSDP scales better to heterogeneous or lower-bandwidth networks because its communication patterns are more predictable and easier to overlap with computation. [18]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-8-2",
+      "heading": "8.1.2 Memory Bandwidth Bottlenecks",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Transformer training is heavily **Memory Bandwidth Bound** during the decoding phase of evaluation but **Compute (FLOPs) Bound** during the massive matrix multiplications of the pretraining forward pass. [19] The H100 provides 3.35 TB/s of HBM3 bandwidth, which is the limiting factor for how fast the weights and gradients can be moved into the compute cores. [19]"
+        },
+        {
+          "type": "text",
+          "content": "In FSDP, the interconnect speed (e.g., 400 Gbps) becomes an extension of this bandwidth bottleneck, as the model cannot compute a layer faster than it can all-gather the parameters from peer GPUs. [35]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s3-emerging",
+      "heading": "9.1 Emerging Techniques",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "As model sizes and context lengths continue to grow, new techniques are emerging to handle the increased demands."
+        },
+        {
+          "type": "list",
+          "style": "detail",
+          "items": [
+            {
+              "label": "Context Parallelism",
+              "detail": "Splitting very long sequences across ranks allows handling million-token inputs. Meta's recent research enables tensor, context, and expert parallelism for 1M-10M token contexts, where attention costs dominate both memory and compute. [17]"
+            },
+            {
+              "label": "Unit Scheduling",
+              "detail": "Dynamically scheduling micro-batches and recomputation blocks can further reduce peak memory usage in pipelines without sacrificing throughput. [18]"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "keyTakeaway",
+      "points": [
+        "**Data Mixing:** Maintain a 1:1 ratio (e.g. BloombergGPT's 50/50) between specialized domain data and general data to prevent catastrophic forgetting. [2]",
+        "**3D Parallelism:** Use TP within GPU nodes, PP across nodes, and ZeRO-3/FSDP for data parallelism. For sequences exceeding 8k tokens, enable Sequence Parallelism. [23]",
+        "**Optimization:** Implement **Learning Rate Rewarming** to 5-10% of the original peak, followed by cosine decay. Use gradient accumulation (100-1000 micro-batches) for small domain corpora. [43]",
+        "**Tokenization:** Unigram tokenizers can provide up to ~10% better accuracy than BPE on domain QA benchmarks. [5]",
+        "**ZeroPP:** A well-scheduled PP+ZeRO-3 pipeline can outperform TP+PP, eliminating tensor parallelism communication overhead. [50]",
+        "**Hardware Efficiency:** Aim for MFU > 60-70%, use mixed precision (BF16), and enable FlashAttention and fused kernels. [19]",
+        "**Context Parallelism:** Meta's research enables handling of 1M-10M token contexts by splitting sequences across GPU ranks. [17]"
+      ]
+    },
+    {
+      "type": "references",
+      "items": [
+        {
+          "num": 1,
+          "text": "BloombergGPT: A Large Language Model for Finance - arXiv",
+          "url": "https://ar5iv.labs.arxiv.org/html/2303.17564"
+        },
+        {
+          "num": 2,
+          "text": "Efficient continual pre-training LLMs for financial domains - Amazon AWS",
+          "url": "https://aws.amazon.com/blogs/machine-learning/efficient-continual-pre-training-llms-for-financial-domains/"
+        },
+        {
+          "num": 3,
+          "text": "chapter 3 gpt.pdf",
+          "url": ""
+        },
+        {
+          "num": 4,
+          "text": "Mastering Continual Pretraining: How to Transform Generalist LLMs into Domain Experts",
+          "url": "https://pub.towardsai.net/mastering-continual-pretraining-how-to-transform-generalist-llms-into-domain-experts-12ecb2538b9c"
+        },
+        {
+          "num": 5,
+          "text": "Byte Pair Encoding is Suboptimal for Language Model Pretraining - arXiv",
+          "url": "https://ar5iv.labs.arxiv.org/html/2004.03720"
+        },
+        {
+          "num": 7,
+          "text": "A Practitioner's Guide to Continual Multimodal Pretraining - NeurIPS",
+          "url": "https://proceedings.neurips.cc/paper_files/paper/2024/file/f1a6a2cdc7e65dbb4579e78f97cd2665-Paper-Datasets_and_Benchmarks_Track.pdf"
+        },
+        {
+          "num": 8,
+          "text": "ZeroPP: Unleashing Exceptional Parallelism Efficiency through TP-Free Methodology - arXiv",
+          "url": "https://arxiv.org/html/2402.03791v3"
+        },
+        {
+          "num": 9,
+          "text": "DeepSpeed4Science Overview and Tutorial - DeepSpeed",
+          "url": "https://www.deepspeed.ai/deepspeed4science/"
+        },
+        {
+          "num": 10,
+          "text": "FullyShardedDataParallel - Hugging Face",
+          "url": "https://huggingface.co/docs/transformers/en/fsdp"
+        },
+        {
+          "num": 12,
+          "text": "Derivation of the Gradient of the cross-entropy Loss",
+          "url": "https://jmlb.github.io/ml/2017/12/26/Calculate_Gradient_Softmax/"
+        },
+        {
+          "num": 13,
+          "text": "Continual Pre-Training of Large Language Models: How to (re)warm your model? - arXiv",
+          "url": "https://ar5iv.labs.arxiv.org/html/2308.04014"
+        },
+        {
+          "num": 14,
+          "text": "5 Data Preparation Methods for Domain-Specific LLMs - Dataversity",
+          "url": "https://www.dataversity.net/articles/5-data-preparation-methods-for-domain-specific-llms/"
+        },
+        {
+          "num": 16,
+          "text": "Does AI model offloading matter? Benchmarking RAM and NVMe Strategies for LLM Training - Xinnor",
+          "url": "https://xinnor.io/blog/does-ai-model-offloading-matter-benchmarking-ram-and-nvme-strategies-for-llm-training/"
+        },
+        {
+          "num": 17,
+          "text": "Scaling LLM Inference: Innovations in Tensor Parallelism, Context Parallelism, and Expert Parallelism - Engineering at Meta",
+          "url": "https://engineering.fb.com/2025/10/17/ai-research/scaling-llm-inference-innovations-tensor-parallelism-context-parallelism-expert-parallelism/"
+        },
+        {
+          "num": 18,
+          "text": "ZeRO (Zero Redundancy Optimizer): The Secret Behind Scaling LLM Training - Medium",
+          "url": "https://medium.com/@dpratishraj7991/zero-zero-redundancy-optimizer-the-secret-behind-scaling-llm-training-f33bb23f4976"
+        },
+        {
+          "num": 19,
+          "text": "Transformer Math 101 | EleutherAI Blog",
+          "url": "https://blog.eleuther.ai/transformer-math/"
+        },
+        {
+          "num": 23,
+          "text": "Activation Recomputation — Megatron Bridge - NVIDIA Documentation",
+          "url": "https://docs.nvidia.com/nemo/megatron-bridge/0.1.0/training/activation-recomputation.html"
+        },
+        {
+          "num": 26,
+          "text": "Megatron-LM - Hugging Face",
+          "url": "https://huggingface.co/docs/accelerate/usage_guides/megatron_lm"
+        },
+        {
+          "num": 27,
+          "text": "Parallelisms Guide — Megatron Bridge - NVIDIA Documentation",
+          "url": "https://docs.nvidia.com/nemo/megatron-bridge/latest/parallelisms.html"
+        },
+        {
+          "num": 28,
+          "text": "Tensor Parallelism Overview — AWS Neuron Documentation",
+          "url": "https://awsdocs-neuron.readthedocs-hosted.com/en/latest/libraries/nxd-training/app_notes/nxd-training-tp-appnote.html"
+        },
+        {
+          "num": 35,
+          "text": "Fully Sharded Data Parallelism (FSDP) Overview - Emergent Mind",
+          "url": "https://www.emergentmind.com/topics/fully-sharded-data-parallelism-fsdp"
+        },
+        {
+          "num": 36,
+          "text": "FullyShardedDataParallel — PyTorch 2.10 documentation",
+          "url": "https://docs.pytorch.org/docs/stable/fsdp.html"
+        },
+        {
+          "num": 43,
+          "text": "Continual Pretraining: Unlocking the Full Potential of Large Language Models - GoML",
+          "url": "https://www.goml.io/blog/continual-pretraining-unlocking-the-full-potential-of-large-language-models"
+        },
+        {
+          "num": 45,
+          "text": "Continued Pretraining with TinyLlama 1.1B - Lightning AI",
+          "url": "https://lightning.ai/lightning-ai/studios/continued-pretraining-with-tinyllama-1-1b"
+        },
+        {
+          "num": 46,
+          "text": "Continual Pre-Training of Large Language Models: How to re-warm your model?",
+          "url": "https://icml.cc/virtual/2023/28270"
+        },
+        {
+          "num": 50,
+          "text": "ZeroPP: Unleashing Exceptional Parallelism Efficiency through TP-Free Methodology - arXiv",
+          "url": "https://arxiv.org/html/2402.03791v3"
+        }
+      ]
+    }
+  ]
+}

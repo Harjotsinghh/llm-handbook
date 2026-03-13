@@ -1,0 +1,487 @@
+{
+    "id": "ch13",
+    "title": "13. Inference Optimization",
+    "subtitle": "FP8 Quantization, Speculative Decoding, Medusa & Multi-LoRA Serving",
+    "icon": "",
+    "color": "#f43f5e",
+    "sections": [
+        {
+            "type": "intro",
+            "heading": "Optimization and Scalability in LLM Inference",
+            "body": "The transition from serving exploratory LLMs to maintaining production-grade infrastructures capable of handling millions of concurrent requests necessitates a fundamental reassessment of precision, algorithmic execution, and memory management. Standard 16-bit inference, while numerically robust, is economically and operationally unsustainable at scale due to the high costs of H100/A100 compute time and the memory-bound nature of autoregressive decoding. [1] The industry has shifted toward a heterogeneous optimization stack involving **FP8 quantization**, speculative execution paradigms such as **Medusa** and **Draft-and-Verify**, and multi-tenant adapter serving frameworks like **LoRAX**. [1]"
+        },
+        {
+            "type": "section",
+            "id": "s13-1",
+            "heading": "1. FP8 Numerical Architecture and the Precision-Efficiency Frontier",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "The NVIDIA Hopper architecture (H100/H200) brought native support for **FP8**, representing a paradigm shift from the integer-based quantization (INT8) that dominated previous generations. [3] Unlike INT8, which often requires complex calibration and exhibits a significant accuracy 'cliff' for models with large activation outliers, FP8 preserves the dynamic range benefits of floating-point representations while halving the memory footprint of weights and KV caches. [1]"
+                },
+                {
+                    "type": "text",
+                    "content": "The engineering rationale for FP8 over INT8 centers on the distribution of weights and activations in transformer models. These distributions frequently exhibit 'long tails' or high-magnitude outliers that are difficult to map onto the linear grid of an integer format. [8] Floating-point formats allocate bits to an exponent, allowing for a logarithmic distribution of representable values, which aligns more closely with the Gaussian or near-Gaussian distributions typical of neural network parameters. [8]"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s13-2",
+            "heading": "1.2 Mathematical Foundations of FP8 E4M3 and E5M2",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "In the Hopper architecture, two distinct FP8 formats are utilized: **E4M3** (4 bits exponent, 3 mantissa) and **E5M2** (5 bits exponent, 2 mantissa). [7] The value representation is governed by:"
+                },
+                {
+                    "type": "equation",
+                    "label": "FP8 Value Representation",
+                    "tex": "\\text{value} = (-1)^s \\times 2^{E - \\text{bias}} \\times (1 + F)",
+                    "description": "Where s is the sign bit, E is the exponent, F is the fraction (mantissa), and the bias is format-specific. [8]"
+                },
+                {
+                    "type": "table",
+                    "title": "FP8 Format Comparison",
+                    "headers": [
+                        "Feature",
+                        "FP8 E4M3",
+                        "FP8 E5M2",
+                        "BF16 (Reference)"
+                    ],
+                    "rows": [
+                        [
+                            "Sign Bit",
+                            "1",
+                            "1",
+                            "1"
+                        ],
+                        [
+                            "Exponent Bits",
+                            "4",
+                            "5",
+                            "8"
+                        ],
+                        [
+                            "Mantissa Bits",
+                            "3",
+                            "2",
+                            "7"
+                        ],
+                        [
+                            "Bias",
+                            "7",
+                            "15",
+                            "127"
+                        ],
+                        [
+                            "Max Value",
+                            "448",
+                            "57,344",
+                            "~3.4 × 10³⁸"
+                        ],
+                        [
+                            "Precision",
+                            "Higher",
+                            "Lower",
+                            "Highest"
+                        ],
+                        [
+                            "Dynamic Range",
+                            "Lower",
+                            "Higher",
+                            "Highest"
+                        ]
+                    ]
+                },
+                {
+                    "type": "text",
+                    "content": "**E4M3** is generally preferred for inference (weights and activations) because language model performance is highly sensitive to precision in the mantissa. [9] **E5M2** is reserved for gradients or scenarios where the dynamic range is extreme, as its representable values extend much further but with coarser granularity. [8]"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s13-3",
+            "heading": "1.3 Implementation Logic: Scaling and Quantization",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "Because the representable range of FP8 is significantly narrower than BF16, engineers must apply a **scaling factor** $S$ to align the tensor's distribution with the FP8 range. [9] The quantization of a high-precision tensor $X$ to its FP8 representation $X_{FP8}$ is:"
+                },
+                {
+                    "type": "equation",
+                    "label": "FP8 Quantization",
+                    "tex": "X_{FP8} = \\text{clamp}\\left(\\text{round}(X \\cdot S), -\\text{FP8}_{\\max}, \\text{FP8}_{\\max}\\right)",
+                    "description": "The scale S maps the tensor's dynamic range into the FP8 representable range."
+                },
+                {
+                    "type": "text",
+                    "content": "In practice, a **Delayed Scaling** strategy is implemented to avoid the overhead of computing the absolute maximum (AMAX) for every tensor in real-time. [10] This mechanism maintains an `amax_history` of previous iterations to predict the optimal scale for the current step. [14]"
+                },
+                {
+                    "type": "code",
+                    "language": "python",
+                    "filename": "fp8_linear.py",
+                    "code": "import torch\n\nclass FP8LinearLayer(torch.nn.Module):\n    def __init__(self, in_features, out_features, bias=True):\n        super().__init__()\n        self.weight = torch.nn.Parameter(torch.empty(out_features, in_features))\n        if bias:\n            self.bias = torch.nn.Parameter(torch.empty(out_features))\n        else:\n            self.register_parameter('bias', None)\n        # Buffers for scaling factors and AMAX history\n        self.register_buffer('weight_scale', torch.ones(1))\n        self.register_buffer('input_scale', torch.ones(1))\n        self.register_buffer('amax_history', torch.zeros(1024))\n        self.history_index = 0\n\n    def forward(self, x):\n        # 1. Update AMAX history for delayed scaling\n        current_amax = x.abs().max()\n        self.amax_history[self.history_index] = current_amax\n        self.history_index = (self.history_index + 1) % 1024\n\n        # 2. Derive new scale: S = FP8_MAX / max(amax_history)\n        predicted_amax = self.amax_history.max()\n        new_scale = 448.0 / (predicted_amax + 1e-6)\n\n        # 3. Quantize inputs and weights\n        x_fp8 = (x * self.input_scale).to(torch.float8_e4m3fn)\n        w_fp8 = (self.weight * self.weight_scale).to(torch.float8_e4m3fn)\n\n        # 4. Scaled matrix multiplication\n        output, _ = torch._scaled_mm(\n            x_fp8, w_fp8.t(),\n            scale_a=torch.tensor([1.0/self.input_scale], device='cuda'),\n            scale_b=torch.tensor([1.0/self.weight_scale], device='cuda'),\n            out_dtype=torch.bfloat16\n        )\n        return output"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s13-4",
+            "heading": "1.4 Efficiency Analysis: Hardware Implications of FP8",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "The utilization of FP8 on NVIDIA H100 GPUs provides a multi-dimensional speedup that is non-linear compared to 16-bit serving. [3]"
+                },
+                {
+                    "type": "list",
+                    "style": "detail",
+                    "items": [
+                        {
+                            "label": "Throughput Gain",
+                            "detail": "The H100 SXM5 delivers ~1,979 TFLOPS of FP8 Tensor Core performance — exactly **double** its BF16 rate of ~989 TFLOPS. [3]"
+                        },
+                        {
+                            "label": "Memory Bandwidth Utilization",
+                            "detail": "LLM decoding is memory-bound. By reducing weight size and KV cache by 50%, FP8 effectively doubles the 'tokens per byte' read from HBM3. [9]"
+                        },
+                        {
+                            "label": "VRAM Footprint",
+                            "detail": "A 70B model requires ~140 GB in BF16 (impossible on single 80 GB H100). In FP8, the same model occupies ~70 GB, enabling single-GPU serving with room for context window. [1]"
+                        }
+                    ]
+                },
+                {
+                    "type": "mermaid",
+                    "title": "H100 Memory Hierarchy: BF16 vs FP8 Transfer Speed",
+                    "code": "graph LR\n  subgraph Memory[\"H100 Memory Hierarchy\"]\n    HBM[HBM3] --> L2[L2 Cache]\n    L2 --> SM[Streaming Multiprocessor]\n  end\n  BF16[BF16 Weights] -->|\"Slow Transfer\"| SM\n  FP8[FP8 Weights] -->|\"2x Faster Transfer\"| SM\n  SM -->|\"Tensor Cores\"| Out[Output]"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s13-5",
+            "heading": "2. Speculative Decoding: Overcoming the Memory Wall",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "Autoregressive generation is inherently sequential: token $t_{n+1}$ cannot be calculated until token $t_n$ is sampled and its KV cache updated. [1] This results in extremely low GPU utilization because the time spent loading weights from memory far exceeds computation time. [19] **Speculative decoding** breaks this bottleneck by using a small, high-velocity 'draft model' to predict several potential future tokens, which the large 'target model' then verifies in a single parallel pass. [1]"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s13-6",
+            "heading": "2.1 The Mathematical Engine of Rejection Sampling",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "To maintain the exact distribution of the target model, speculative decoding employs a modified **rejection sampling** scheme. [2] Let $p(x)$ be the probability distribution of the target model and $q(x)$ be that of the draft model. [2]"
+                },
+                {
+                    "type": "text",
+                    "content": "For a draft token $\\hat{x}$ proposed by the draft model:"
+                },
+                {
+                    "type": "steps",
+                    "title": "Rejection Sampling Protocol",
+                    "items": [
+                        "**Accept** the token with probability: $\\min\\left(1, \\frac{p(\\hat{x})}{q(\\hat{x})}\\right)$",
+                        "**If rejected**, resample a new token from the adjusted distribution: $p'(x) = \\text{norm}\\left(\\max(0, p(x) - q(x))\\right)$ [2]"
+                    ]
+                },
+                {
+                    "type": "callout",
+                    "style": "concept",
+                    "title": "Lossless Guarantee",
+                    "content": "This ensures the speculative system is **lossless** — its outputs are statistically indistinguishable from the large model served independently. [2]"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s13-7",
+            "heading": "2.2 Performance Modeling: Acceptance Rate and Speedup",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "The speedup of speculative decoding is determined by the draft model's **acceptance rate** $\\alpha$ and the number of speculative tokens $\\gamma$. [19] The average number of tokens produced per step is:"
+                },
+                {
+                    "type": "equation",
+                    "label": "Expected Accepted Tokens",
+                    "tex": "\\mathbb{E}[\\text{accepted}] = \\frac{1 - \\alpha^{\\gamma+1}}{1 - \\alpha}",
+                    "description": "Average tokens accepted per verification step as a function of acceptance rate α and speculation length γ."
+                },
+                {
+                    "type": "equation",
+                    "label": "Speculative Speedup",
+                    "tex": "\\text{Speedup} = \\frac{\\mathbb{E}[\\text{accepted}]}{c_{\\text{draft}} \\cdot \\gamma + c_{\\text{target}}}",
+                    "description": "Where c_draft is the cost of a draft forward pass and c_target is the cost of the target pass. Since c_draft ≪ c_target, even modest acceptance rates (α ≈ 0.7) yield 2-3× speedup. [19]"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s13-8",
+            "heading": "2.3 Implementation Logic: The Speculative Loop",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "The engineering challenge lies in managing the state of two models and their respective KV caches. [19]"
+                },
+                {
+                    "type": "code",
+                    "language": "python",
+                    "filename": "speculative_decoding.py",
+                    "code": "def speculative_step(target_model, draft_model, input_ids, gamma=5):\n    # 1. Draft model generates gamma candidate tokens\n    draft_ids = input_ids.clone()\n    for _ in range(gamma):\n        logits = draft_model(draft_ids).logits[:, -1, :]\n        next_token = torch.argmax(logits, dim=-1)\n        draft_ids = torch.cat([draft_ids, next_token.unsqueeze(-1)], dim=-1)\n\n    # 2. Target model evaluates candidates in one parallel pass\n    target_logits = target_model(draft_ids).logits[:, -(gamma+1):, :]\n    target_probs = torch.softmax(target_logits, dim=-1)\n\n    # 3. Probabilistic Verification\n    accepted_tokens = [input_ids]\n    for i in range(gamma):\n        p = target_probs[:, i, draft_ids[:, -gamma+i]]\n        q = draft_probs[:, i, draft_ids[:, -gamma+i]]  # Cached\n        r = torch.rand(1)\n        if r < torch.min(torch.tensor(1.0), p/q):\n            accepted_tokens.append(draft_ids[:, -gamma+i])\n        else:\n            # Rejection: sample from adjusted distribution\n            resampled = sample_adjusted(target_probs[:, i, :], q_probs[:, i, :])\n            accepted_tokens.append(resampled)\n            break\n\n    return torch.cat(accepted_tokens, dim=-1)"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s13-9",
+            "heading": "3. Medusa: Parallel Head Prediction and Tree-Based Attention",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "While standard speculative decoding requires two separate models, **Medusa** integrates the speculation directly into the backbone architecture. [4] By appending multiple 'heads' to the final layer, the model predicts tokens for positions $t+1, t+2, ..., t+k$ simultaneously. [4]"
+                },
+                {
+                    "type": "text",
+                    "content": "Unlike linear speculation, Medusa explores a **tree** of possibilities, verifying multiple Top-K candidates for each future position in parallel. [24] This requires a specialized attention mask to ensure that tokens in different branches of the tree do not attend to each other, maintaining causal integrity. [24]"
+                },
+                {
+                    "type": "text",
+                    "content": "If the model predicts Top-2 for Head 1 and Top-2 for Head 2, it creates four possible paths. [24] The tree attention mask $M_{i,j}$ for node $i$ attending to node $j$ is:"
+                },
+                {
+                    "type": "equation",
+                    "label": "Tree Attention Mask",
+                    "tex": "M_{i,j} = \\begin{cases} 0 & \\text{if } j \\in \\text{Ancestors}(i) \\cup \\{i\\} \\\\ -\\infty & \\text{otherwise} \\end{cases}",
+                    "description": "Tokens can only attend to their ancestors in the speculation tree, preserving causal integrity. [25]"
+                },
+                {
+                    "type": "mermaid",
+                    "title": "Medusa Tree Attention: Multi-Path Speculation",
+                    "code": "graph TD\n  L0[\"Last Token (t)\"] --> P10[\"Head 1: Token A\"]\n  L0 --> P11[\"Head 1: Token B\"]\n  P10 --> P20[\"Head 2: Path A\"]\n  P10 --> P21[\"Head 2: Path B\"]\n  P11 --> P22[\"Head 2: Path C\"]\n  P11 --> P23[\"Head 2: Path D\"]\n  style L0 fill:#f9f,stroke:#333"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s13-10",
+            "heading": "3.2 Medusa Training: Distillation and Loss Weighting",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "**Medusa-1** keeps the backbone frozen and only trains the heads. [4] **Medusa-2** uses a joint training approach where the heads are trained using the probability distribution of the original model as the target (**Knowledge Distillation**). [4]"
+                },
+                {
+                    "type": "text",
+                    "content": "The loss function $\\mathcal{L}$ for Medusa heads is a weighted sum of cross-entropy terms:"
+                },
+                {
+                    "type": "equation",
+                    "label": "Medusa Loss Function",
+                    "tex": "\\mathcal{L} = \\sum_{k=1}^{K} \\lambda^{k-1} \\cdot \\text{CE}(\\hat{y}_{t+k}, y_{t+k})",
+                    "description": "Where λ is a decay factor (typically 0.8) because predictions further in the future are naturally less accurate. [25]"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s13-11",
+            "heading": "4. Multi-LoRA Serving: Infrastructure Consolidation with LoRAX",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "Enterprise AI deployment often requires thousands of task-specific adapters (LoRA) layered over a single base model. [5] Loading a separate 70B model for 1,000 customers would require millions in hardware; **LoRAX (LoRA Exchange)** enables serving these thousands of models on the same hardware that previously served one. [5]"
+                },
+                {
+                    "type": "text",
+                    "content": "The primary bottleneck in multi-adapter serving is the inability to batch requests that use different adapters. [31] Standard BMM operations require weights to be identical for all items in the batch. The **SGMV (Segmented Gather Matrix-Vector) kernel**, introduced by the Punica project, allows a batch to be multiplied by different low-rank matrices in a single operation. [31]"
+                },
+                {
+                    "type": "equation",
+                    "label": "SGMV Operation",
+                    "tex": "y_i = x_i \\cdot A_i \\cdot B_i \\quad \\forall i \\in \\text{batch}",
+                    "description": "Each request i in the batch uses its own LoRA matrices A_i and B_i, processed in a single fused kernel call. [30]"
+                },
+                {
+                    "type": "text",
+                    "content": "To handle dynamic loading of adapters, LoRAX utilizes a **Unified Paging** system. [5] Adapter weights and KV caches are stored in a shared memory pool on the GPU, with 'hot' adapters kept in VRAM and others offloaded to CPU RAM. [5] This prevents fragmentation and allows dynamic allocation during a request. [34]"
+                },
+                {
+                    "type": "table",
+                    "title": "Naive Multi-LoRA vs. Punica/LoRAX",
+                    "headers": [
+                        "Metric",
+                        "Naive Multi-LoRA",
+                        "Punica/LoRAX"
+                    ],
+                    "rows": [
+                        [
+                            "Batch Size",
+                            "Restricted to 1 adapter/batch",
+                            "Global batching across all adapters [31]"
+                        ],
+                        [
+                            "Memory Overhead",
+                            "O(N × model_size)",
+                            "O(model_size + N × adapter_size) [34]"
+                        ],
+                        [
+                            "Latency",
+                            "High (cold starts)",
+                            "~2ms overhead per token [6]"
+                        ],
+                        [
+                            "Throughput",
+                            "1× per adapter",
+                            "Up to 30× with batching [6]"
+                        ]
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s13-12",
+            "heading": "5. Engineering Summary: Hardware-Aware Systems Design",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "Successful implementation of these strategies requires deep understanding of the underlying hardware limits. [3]"
+                },
+                {
+                    "type": "list",
+                    "style": "detail",
+                    "items": [
+                        {
+                            "label": "FP8 for Capacity",
+                            "detail": "Engineers use FP8 primarily to overcome the VRAM capacity limit. By fitting larger models or larger batches into memory, they increase the arithmetic intensity of each operation. [3]"
+                        },
+                        {
+                            "label": "Speculation for Latency",
+                            "detail": "Speculative decoding and Medusa overcome the memory bandwidth limit during decode. By generating multiple tokens for the same memory-read cost, they shift the bottleneck back toward compute. [9]"
+                        },
+                        {
+                            "label": "LoRAX for Economics",
+                            "detail": "Multi-adapter serving is an economic optimization. It reduces Total Cost of Ownership (TCO) from a linear function of model count to a function of total request volume. [6]"
+                        }
+                    ]
+                },
+                {
+                    "type": "text",
+                    "content": "By integrating these three pillars, an AI Research Engineer can architect a system that is not only mathematically sound but also commercially viable, bridging the theoretical capabilities of transformers with the practical requirements of production-scale engineering. [1]"
+                }
+            ]
+        },
+        {
+            "type": "keyTakeaway",
+            "points": [
+                "**FP8 E4M3** is preferred for inference — its 3-bit mantissa preserves precision while halving memory footprint vs BF16.",
+                "**Delayed Scaling** avoids per-tensor AMAX overhead by maintaining a rolling history to predict the optimal FP8 scale factor.",
+                "H100 delivers **2× TFLOPS** in FP8 vs BF16 (1,979 vs 989), making FP8 both faster and more memory-efficient.",
+                "**Speculative decoding** is lossless — rejection sampling guarantees statistical equivalence with the target model.",
+                "Even modest acceptance rates ($\\alpha \\approx 0.7$) yield **2-3× speedup** because verification is parallelized.",
+                "**Medusa** eliminates the need for a separate draft model by appending prediction heads directly to the backbone.",
+                "Medusa's **tree attention mask** enables parallel verification of multiple speculation branches in a single forward pass.",
+                "**LoRAX/SGMV kernel** enables batching across different LoRA adapters, reducing multi-tenant serving cost from $O(N \\times \\text{model})$ to $O(\\text{model} + N \\times \\text{adapter})$."
+            ]
+        },
+        {
+            "type": "references",
+            "items": [
+                {
+                    "num": 1,
+                    "text": "chapter 13.pdf"
+                },
+                {
+                    "num": 2,
+                    "text": "Looking Back at Speculative Decoding - Google Research",
+                    "url": "https://research.google/blog/looking-back-at-speculative-decoding/"
+                },
+                {
+                    "num": 3,
+                    "text": "FLOPS Performance of NVIDIA H100 - Jarvis Labs",
+                    "url": "https://jarvislabs.ai/ai-faqs/what-is-the-flops-performance-of-the-nvidia-h100-gpu"
+                },
+                {
+                    "num": 4,
+                    "text": "Medusa: LLM Acceleration with Multiple Decoding Heads - arXiv",
+                    "url": "https://arxiv.org/html/2401.10774v1"
+                },
+                {
+                    "num": 5,
+                    "text": "LoRAX: Multi-LoRA Inference Server - GitHub",
+                    "url": "https://github.com/predibase/lorax"
+                },
+                {
+                    "num": 6,
+                    "text": "Multi-Adapter Inference: Technical Analysis of LoRAX - Towards AI",
+                    "url": "https://pub.towardsai.net/the-architectural-paradigm-of-multi-adapter-inference-a-technical-analysis-of-lorax-567c2f4851f0"
+                },
+                {
+                    "num": 7,
+                    "text": "NVIDIA Hopper Architecture In-Depth - NVIDIA",
+                    "url": "https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/"
+                },
+                {
+                    "num": 8,
+                    "text": "FP8 Quantization: Power of the Exponent - arXiv",
+                    "url": "https://arxiv.org/html/2208.09225v2"
+                },
+                {
+                    "num": 9,
+                    "text": "FP8 Across Accelerators for LLM Inference - arXiv",
+                    "url": "https://arxiv.org/html/2502.01070v1"
+                },
+                {
+                    "num": 10,
+                    "text": "Mechanics of FP8 for LLMs - Medium",
+                    "url": "https://medium.com/@romitjain/mechanics-of-fp8-for-llms-9242e726f3d9"
+                },
+                {
+                    "num": 14,
+                    "text": "User Guide on Using FP8 - Flax Linen",
+                    "url": "https://flax-linen.readthedocs.io/en/v0.11.1/guides/quantization/fp8_basics.html"
+                },
+                {
+                    "num": 19,
+                    "text": "Speculative Decoding - BentoML LLM Handbook",
+                    "url": "https://bentoml.com/llm/inference-optimization/speculative-decoding"
+                },
+                {
+                    "num": 24,
+                    "text": "Speculative Sampling — TensorRT-LLM",
+                    "url": "https://nvidia.github.io/TensorRT-LLM/advanced/speculative-decoding.html"
+                },
+                {
+                    "num": 25,
+                    "text": "Medusa: Making LLMs Generate Text Faster - Medium",
+                    "url": "https://kargarisaac.medium.com/medusa-making-large-language-models-generate-text-faster-dd894ef6df6b"
+                },
+                {
+                    "num": 30,
+                    "text": "Serving Thousands of Concurrent LoRA Adapters - Medium",
+                    "url": "https://medium.com/@mukulranjan/serving-thousands-of-concurrent-lora-adapters-6b407e8df516"
+                },
+                {
+                    "num": 31,
+                    "text": "Punica: Multi-Tenant LoRA Serving - MLSys",
+                    "url": "https://www.yongjiwu.me/assets/pdf/mlsys24-punica.pdf"
+                },
+                {
+                    "num": 34,
+                    "text": "S-LoRA: Scalable LoRA Serving - Emergent Mind",
+                    "url": "https://www.emergentmind.com/topics/scalable-serving-s-lora-system"
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,143 @@
+{
+    "id": "ch0",
+    "title": "Learning Roadmap",
+    "subtitle": "Overview & Contents",
+    "icon": "",
+    "color": "#6366f1",
+    "sections": [
+        {
+            "type": "hero",
+            "heading": "The Not-So-Complete (But Trying) LLM Engineer's Handbook",
+            "subheading": "From Pretraining to High-Throughput Deployment",
+            "body": "A practitioner's guide covering the full LLM engineering stack — architecture, training, alignment, deployment, and optimization. Select a chapter to begin."
+        },
+        {
+            "type": "roadmap",
+            "heading": "Foundations",
+            "items": [
+                {
+                    "num": 1,
+                    "label": "Foundations of Modern LLMs",
+                    "tag": "Theory",
+                    "desc": "Tokenization (BPE, WordPiece), decoder-only transformers, self-attention math, RMSNorm, RoPE, scaling laws",
+                    "url": "#ch1"
+                },
+                {
+                    "num": 2,
+                    "label": "Data Engineering at Scale",
+                    "tag": "Data",
+                    "desc": "Distributed pipelines (Ray vs Spark), MinHash deduplication, quality filtering, synthetic data generation",
+                    "url": "#ch2"
+                }
+            ]
+        },
+        {
+            "type": "roadmap",
+            "heading": "Training & Fine-Tuning",
+            "items": [
+                {
+                    "num": 3,
+                    "label": "Continuous Pretraining",
+                    "tag": "Training",
+                    "desc": "Domain adaptation strategies, CLM loss, data mixing ratios, distributed training at 70B scale",
+                    "url": "#ch3"
+                },
+                {
+                    "num": 4,
+                    "label": "Supervised Fine-Tuning",
+                    "tag": "Training",
+                    "desc": "Chat templates, label masking, gradient flow, LoRA/QLoRA, sequence packing, cut cross-entropy",
+                    "url": "#ch4"
+                },
+                {
+                    "num": 5,
+                    "label": "Parameter-Efficient Fine-Tuning",
+                    "tag": "Training",
+                    "desc": "LoRA math and rank selection, QLoRA + NF4, DoRA (magnitude-direction), PiSSA, memory comparison",
+                    "url": "#ch5"
+                }
+            ]
+        },
+        {
+            "type": "roadmap",
+            "heading": "Alignment & Evaluation",
+            "items": [
+                {
+                    "num": 6,
+                    "label": "Preference Alignment",
+                    "tag": "Alignment",
+                    "desc": "RLHF pipeline, DPO loss derivation, KTO (unpaired data), GRPO (group reward), reward modeling",
+                    "url": "#ch6"
+                },
+                {
+                    "num": 7,
+                    "label": "Evaluation & Benchmarking",
+                    "tag": "Eval",
+                    "desc": "MMLU, HumanEval + Pass@k, data contamination detection, LLM-as-a-Judge, Arena Elo rankings",
+                    "url": "#ch7"
+                }
+            ]
+        },
+        {
+            "type": "roadmap",
+            "heading": "Applied Engineering",
+            "items": [
+                {
+                    "num": 8,
+                    "label": "Quantization & Training Pipelines",
+                    "tag": "Engineering",
+                    "desc": "NF4 theory, double quantization, end-to-end QLoRA + SFT pipelines, DPO integration",
+                    "url": "#ch8"
+                },
+                {
+                    "num": 9,
+                    "label": "The Modern LLM Stack",
+                    "tag": "Engineering",
+                    "desc": "Post-DPO alignment variants, precision data curation, LoRA ecosystem, inference serving overview",
+                    "url": "#ch9"
+                }
+            ]
+        },
+        {
+            "type": "roadmap",
+            "heading": "Deployment & Inference",
+            "items": [
+                {
+                    "num": 10,
+                    "label": "Inference Serving & Memory",
+                    "tag": "Deployment",
+                    "desc": "KV cache math, PagedAttention, continuous batching, distributed inference strategies",
+                    "url": "#ch10"
+                },
+                {
+                    "num": 11,
+                    "label": "Diagnostics & Debugging",
+                    "tag": "Ops",
+                    "desc": "CUDA OOM runbook, VRAM taxonomy, gradient checkpointing math, ZeRO stages, NaN/Inf loss",
+                    "url": "#ch11"
+                },
+                {
+                    "num": 12,
+                    "label": "LLM Inference Engineering",
+                    "tag": "Architecture",
+                    "desc": "Roofline model, arithmetic intensity, KV cache evolution (MHA→GQA→MLA), scheduling",
+                    "url": "#ch12"
+                },
+                {
+                    "num": 13,
+                    "label": "Inference Optimization",
+                    "tag": "Optimization",
+                    "desc": "FP8 quantization, speculative decoding, rejection sampling, Medusa tree attention, LoRAX",
+                    "url": "#ch13"
+                },
+                {
+                    "num": 14,
+                    "label": "Frontier Architectures",
+                    "tag": "Scale",
+                    "desc": "MLA deep-dive, Meta 24K GPU clusters, RoCE vs InfiniBand, o1 reasoning, scaling laws",
+                    "url": "#ch14"
+                }
+            ]
+        }
+    ]
+}

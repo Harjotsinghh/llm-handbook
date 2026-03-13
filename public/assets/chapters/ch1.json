@@ -1,0 +1,750 @@
+{
+    "id": "ch1",
+    "title": "1. Foundations of Modern LLMs",
+    "subtitle": "Tokenization, Transformer Architecture, Self-Attention & Scaling Laws",
+    "icon": "",
+    "color": "#8b5cf6",
+    "sections": [
+        {
+            "type": "intro",
+            "heading": "Chapter 1: The Engineering Foundations of Modern LLMs",
+            "body": "Before we can train or deploy a Large Language Model (LLM), we must strip away the marketing hype. At its most fundamental level, an LLM is a **statistical engine** designed to perform a singular, mathematically complex task: **next-token prediction**.[1] \n\nWhen you give an LLM the sequence \"The cat sat on the\", it calculates a probability distribution across its entire vocabulary. If it determines \"mat\" has a 90% probability and \"refrigerator\" has 0.001%, it selects a token based on your sampling settings and repeats the process.[1]"
+        },
+        {
+            "type": "section",
+            "id": "s1-mermaid-intro",
+            "heading": "",
+            "blocks": [
+                {
+                    "type": "mermaid",
+                    "title": "LLM Next-Token Prediction Flow",
+                    "code": "graph LR\n  subgraph Input\n    A[\"The\"] --> B[\"cat\"]\n    B --> C[\"sat\"]\n    C --> D[\"on\"]\n    D --> E[\"the\"]\n  end\n  E --> F{\"Statistical Engine\"}\n  F -->|90%| G[\"mat\"]\n  F -->|0.001%| H[\"refrigerator\"]\n  G -.->|Feedback Loop| A"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s1-1",
+            "heading": "1.1 Tokenization: The Digital Interface",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "Models do not read \"words\"; they read **tokens**, which are numerical IDs mapped to a predefined dictionary.[1]"
+                },
+                {
+                    "type": "text",
+                    "content": "**1.1.1 Why Byte-Level BPE?**"
+                },
+                {
+                    "type": "text",
+                    "content": "Earlier methods like character-level or word-level tokenization failed due to massive vocabulary sizes or loss of semantic meaning.[3] The industry standard is now **Byte-Level Byte-Pair Encoding (BBPE)**.[4]"
+                },
+                {
+                    "type": "list",
+                    "style": "detail",
+                    "items": [
+                        {
+                            "label": "Mechanism",
+                            "detail": "BBPE treats text as a sequence of raw **UTF-8 bytes**.[5] This ensures a base vocabulary of only 256 tokens and eliminates \"Unknown\" (OOV) tokens, as any character can be represented by its component bytes."
+                        },
+                        {
+                            "label": "Fertility",
+                            "detail": "This is an engineering metric measuring the average number of tokens produced per word.[7] Lower fertility (closer to 1.0) is better for efficiency.[8]"
+                        }
+                    ]
+                },
+                {
+                    "type": "callout",
+                    "style": "insight",
+                    "title": "Engineering Tip",
+                    "content": "Use Rust-backed libraries like OpenAI's `tiktoken` for maximum pre-processing throughput.[1]"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s1-2",
+            "heading": "1.2 Architectural Convergence: Decoder-Only Dominance",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "The original 2017 Transformer paper proposed an **Encoder-Decoder** structure.[1] However, modern engineering has pivoted almost exclusively to **Decoder-Only** stacks (e.g., GPT-4, Llama 3).[1]"
+                },
+                {
+                    "type": "text",
+                    "content": "**1.2.1 Why the Shift?**"
+                },
+                {
+                    "type": "steps",
+                    "title": "Reasons for Decoder-Only Dominance",
+                    "items": [
+                        "**Inference Efficiency:** In Decoder-only models, tokens only attend to previous ones. This allows for **KV Caching**, which avoids recomputing context at every generation step.[10]",
+                        "**Information Flow:** Decoder-only models maintain a continuous **residual stream**, preventing the \"information bottleneck\" that can occur in deep Encoder-Decoder connections.[10]"
+                    ]
+                },
+                {
+                    "type": "mermaid",
+                    "title": "The Modern Decoder Block",
+                    "code": "graph TD\n  subgraph \"The Modern Decoder Block\"\n    Input --> Norm1[\"RMSNorm\"]\n    Norm1 --> Attn[\"Attention Mechanism\"]\n    Attn --> Add1[\"+ Residual\"]\n    Add1 --> Norm2[\"RMSNorm\"]\n    Norm2 --> FFN[\"SwiGLU FFN\"]\n    FFN --> Add2[\"+ Residual\"]\n    Add2 --> Output\n  end"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s1-3",
+            "heading": "1.3 The Mathematics of Self-Attention",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "Self-Attention allows the model to weigh the importance of different words regardless of distance.[1] Every token is projected into three vectors: **Query (Q)**, **Key (K)**, and **Value (V)**.[1]"
+                },
+                {
+                    "type": "equation",
+                    "label": "Scaled Dot-Product Attention",
+                    "tex": "Attention(Q,K,V) = \\text{softmax}\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V",
+                    "description": "The **$\\sqrt{d_k}$** scaling factor is vital; it prevents the dot products from reaching softmax saturation regions, which would cause **Vanishing Gradients**.[1]"
+                },
+                {
+                    "type": "text",
+                    "content": "**1.3.1 Attention Variants (MHA vs. GQA vs. MLA)**"
+                },
+                {
+                    "type": "text",
+                    "content": "Standard **Multi-Head Attention (MHA)** stores a unique K and V vector for every head, which consumes massive VRAM during inference.[15]"
+                },
+                {
+                    "type": "comparison",
+                    "items": [
+                        {
+                            "title": "Grouped-Query Attention (GQA)",
+                            "description": "Adopted by **Llama 2/3**, it groups query heads to share a single Key/Value head.[1] This reduces memory footprint by up to **8x** with minimal accuracy loss.[18]",
+                            "pros": [
+                                "Up to 8x VRAM reduction",
+                                "Minimal accuracy loss"
+                            ],
+                            "cons": [
+                                "Slight quality trade-off vs MHA"
+                            ]
+                        },
+                        {
+                            "title": "Multi-Head Latent Attention (MLA)",
+                            "description": "**DeepSeek's innovation** that compresses KV vectors into a low-rank \"latent\" representation space.[21] This decouples model intelligence from the memory bottleneck.[22]",
+                            "pros": [
+                                "Extreme compression",
+                                "Decouples quality from memory"
+                            ],
+                            "cons": [
+                                "More complex implementation"
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "type": "mermaid",
+                    "title": "MHA vs GQA Architecture",
+                    "code": "graph LR\n  subgraph MHA[\"Multi-Head Attention\"]\n    Q1[\"Q₁\"] --> K1V1[\"K₁V₁\"]\n    Q2[\"Q₂\"] --> K2V2[\"K₂V₂\"]\n  end\n  subgraph GQA[\"Grouped-Query Attention\"]\n    Q3[\"Q₁\"] --> SharedKV[\"Shared KV\"]\n    Q4[\"Q₂\"] --> SharedKV\n  end"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s1-4",
+            "heading": "1.4 Normalization & Activations",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "**1.4.1 RMSNorm vs. LayerNorm**"
+                },
+                {
+                    "type": "text",
+                    "content": "Modern LLMs have replaced standard LayerNorm with **RMSNorm**.[19]"
+                },
+                {
+                    "type": "list",
+                    "style": "detail",
+                    "items": [
+                        {
+                            "label": "Rationale",
+                            "detail": "RMSNorm removes the mean-centering step, making it **~10-15% faster** while maintaining stability.[19]"
+                        },
+                        {
+                            "label": "Placement",
+                            "detail": "We use **Pre-Normalization**, applying the norm *before* the attention layer rather than after the residual addition to improve gradient flow.[27]"
+                        }
+                    ]
+                },
+                {
+                    "type": "text",
+                    "content": "**1.4.2 SwiGLU: The MLP Upgrade**"
+                },
+                {
+                    "type": "text",
+                    "content": "We have moved from ReLU to **SwiGLU**.[19]"
+                },
+                {
+                    "type": "list",
+                    "style": "detail",
+                    "items": [
+                        {
+                            "label": "Mechanism",
+                            "detail": "It uses a gating mechanism where a **SiLU-activated** linear path gates a parallel linear path.[30]"
+                        },
+                        {
+                            "label": "Engineering Note",
+                            "detail": "SwiGLU uses **three weight matrices** instead of two. To maintain parameter count parity, we typically use an **8/3 expansion factor** instead of the standard 4x.[19]"
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s1-5",
+            "heading": "1.5 The Inference Bottleneck: PagedAttention & Speculative Decoding",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "**1.5.1 PagedAttention (vLLM)**"
+                },
+                {
+                    "type": "text",
+                    "content": "Inference is **memory-bandwidth bound**, not compute bound.[33] PagedAttention treats the KV Cache like virtual memory in an operating system.[34]"
+                },
+                {
+                    "type": "list",
+                    "style": "detail",
+                    "items": [
+                        {
+                            "label": "Problem",
+                            "detail": "Traditional systems allocate contiguous memory for max sequence length, **wasting 60-80% of VRAM**.[37]"
+                        },
+                        {
+                            "label": "Solution",
+                            "detail": "Divide memory into non-contiguous **\"pages\"** allocated on-demand.[36]"
+                        }
+                    ]
+                },
+                {
+                    "type": "mermaid",
+                    "title": "PagedAttention Memory Model",
+                    "code": "graph TD\n  subgraph \"Logical Blocks (Sequence View)\"\n    L1 --> L2\n  end\n  subgraph \"Block Table (Mapping)\"\n    L1 --> P3\n    L2 --> P7\n  end\n  subgraph \"GPU VRAM (Fragmented)\"\n    P7\n    P0[Empty]\n    P3\n  end"
+                },
+                {
+                    "type": "text",
+                    "content": "**1.5.2 Speculative Decoding**"
+                },
+                {
+                    "type": "text",
+                    "content": "This technique uses a small **Draft Model** (e.g., 8B) to quickly predict tokens, which a large **Target Model** (e.g., 70B) then verifies in parallel.[39] If the guesses are correct, we generate multiple tokens in the time it takes for a single pass of the large model.[39]"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s1-6",
+            "heading": "1.6 Scaling Laws: Compute-Optimal vs. Inference-Optimal",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "The **Chinchilla Scaling Laws** (DeepMind) established that for every doubling of model size, training tokens must also double.[43]"
+                },
+                {
+                    "type": "comparison",
+                    "items": [
+                        {
+                            "title": "Compute-Optimal",
+                            "description": "Training a model until it reaches its best possible loss for a fixed compute budget. **Ratio: 20 tokens per parameter**.[42]",
+                            "pros": [
+                                "Minimizes training cost"
+                            ],
+                            "cons": [
+                                "Larger model needed for same quality at inference"
+                            ]
+                        },
+                        {
+                            "title": "Inference-Optimal",
+                            "description": "Modern models like Llama 3 are **over-trained** (Ratio: 1,875:1).[44] While this costs more in training, it results in a smaller, faster model that is **cheaper to run in production** over its lifetime.[46]",
+                            "pros": [
+                                "Smaller model at inference",
+                                "Lower serving costs over lifetime"
+                            ],
+                            "cons": [
+                                "Higher upfront training cost"
+                            ]
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s1-7",
+            "heading": "1.7 Post-Training: From Base Model to Reasoning Agent",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "Post-training turns a \"text completer\" into a helpful assistant or a deep reasoner. [1]"
+                },
+                {
+                    "type": "steps",
+                    "title": "The Alignment Spectrum",
+                    "items": [
+                        "**SFT (Supervised Fine-Tuning):** Learning the conversation format from high-quality human Q&A pairs. [1]",
+                        "**DPO (Direct Preference Optimization):** A simplified alternative to RLHF that optimizes the model directly on preference pairs (Chosen vs. Rejected) using a binary cross-entropy loss, bypassing the need for a separate reward model. [1]",
+                        "**KTO (Kahneman-Tversky Optimization):** An alignment method inspired by prospect theory that only requires binary signals (e.g., 👍/👎) instead of ranked pairs. [49]",
+                        "**GRPO (Group Relative Policy Optimization):** The reinforcement learning algorithm behind DeepSeek-R1. It removes the 'Critic' model and instead rewards attempts based on their relative advantage within a group of samples for the same prompt. [51]"
+                    ]
+                },
+                {
+                    "type": "table",
+                    "title": "Alignment Signal Types",
+                    "headers": ["Signal Type", "Example Method", "Engineering Strength"],
+                    "rows": [
+                        ["Imitation", "SFT", "Essential for style and basic formatting. [1]"],
+                        ["Preferences", "DPO / RLHF", "Excellent for safety and nuanced tone. [1]"],
+                        ["Binary Feedback", "KTO", "Scalable; utilizes abundant 'thumbs up/down' data. [49]"],
+                        ["Group Advantage", "GRPO", "Powers emergent reasoning and self-correction. [51]"]
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s1-8",
+            "heading": "1.8 Inference Engineering and Hardware Acceleration",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "**1.8.1 FlashAttention-3/4**"
+                },
+                {
+                    "type": "text",
+                    "content": "FlashAttention fuses operations into a single kernel to minimize HBM reads. The latest generations target specific GPU architectures:"
+                },
+                {
+                    "type": "list",
+                    "style": "detail",
+                    "items": [
+                        {
+                            "label": "FlashAttention-3",
+                            "detail": "Leverages TMA asynchrony on H100 (Hopper) GPUs to overlap computation and memory movement. [9]"
+                        },
+                        {
+                            "label": "FlashAttention-4",
+                            "detail": "Targeted at B200 (Blackwell) GPUs; addresses 'asymmetric hardware scaling' by using software-emulated exponentials to overcome bottlenecks in the multi-function unit (MUFU). [29]"
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s1-9",
+            "heading": "1.9 Evaluation: The Engineering Feedback Loop",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "Engineering reliable LLMs requires a robust evaluation framework beyond simple perplexity. [2]"
+                },
+                {
+                    "type": "steps",
+                    "title": "Evaluation Tiers",
+                    "items": [
+                        "**Academic Benchmarks:** MMLU (General knowledge), GSM8K (Math), HumanEval (Coding).",
+                        "**LLM-as-a-Judge:** Using a stronger model (e.g., GPT-4o) to grade the performance of a smaller model on complex, open-ended rubrics.",
+                        "**Chatbot Arena:** The crowdsourced gold standard of Elo rankings based on blind human preference."
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s1-10",
+            "heading": "1.10 Emerging Frontiers: Reasoning Models and Agents",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "**1.10.1 Inference-Time Scaling (The 'Thinking' Tokens)**"
+                },
+                {
+                    "type": "text",
+                    "content": "Models like **OpenAI o1** and **DeepSeek-R1** generate hidden 'thinking tokens' to explore multiple reasoning paths. This shifts the scaling paradigm: performance can be improved at the cost of 'letting the model think longer' during inference. [57]"
+                },
+                {
+                    "type": "text",
+                    "content": "**1.10.2 Agentic Pillars**"
+                },
+                {
+                    "type": "text",
+                    "content": "Autonomous systems rely on three technical components:"
+                },
+                {
+                    "type": "list",
+                    "style": "detail",
+                    "items": [
+                        {
+                            "label": "Planning",
+                            "detail": "Breaking complex goals into sub-tasks (Chain-of-Thought)."
+                        },
+                        {
+                            "label": "Memory",
+                            "detail": "RAG (Retrieval-Augmented Generation) for long-term knowledge access."
+                        },
+                        {
+                            "label": "Tool-Use",
+                            "detail": "The ability to call external APIs (interpreters, search engines) to interact with the physical world."
+                        }
+                    ]
+                },
+                {
+                    "type": "mermaid",
+                    "title": "Agentic Reasoning Loop",
+                    "code": "graph TD\n    UserRequest[User Request] --> AgentBrain[Agent Brain]\n    AgentBrain --> Planning[Planning Logic]\n    Planning --> ToolUse[Call External API]\n    ToolUse --> Observation[Observation]\n    Observation --> Memory[Update Context]\n    Memory --> AgentBrain\n    AgentBrain --> FinalResponse[Final Response]"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s1-links",
+            "heading": "Further Reading",
+            "blocks": [
+                {
+                    "type": "resource",
+                    "items": [
+                        {
+                            "label": "FlashAttention-3 Paper",
+                            "description": "Fast and Accurate Attention with Asynchrony and Low-precision on Hopper GPUs.",
+                            "url": "https://www.together.ai/blog/flashattention-3"
+                        },
+                        {
+                            "label": "FlashAttention-4 Paper",
+                            "description": "Algorithm and Kernel Pipelining Co-Design for Asymmetric Hardware Scaling on Blackwell.",
+                            "url": "https://www.together.ai/blog/flashattention-4"
+                        },
+                        {
+                            "label": "DeepSeek-R1: GRPO Reference",
+                            "description": "Incentivizing Reasoning Capability in LLMs via Reinforcement Learning.",
+                            "url": "https://arxiv.org/html/2501.12948v1"
+                        },
+                        {
+                            "label": "KTO: Prospect Theoretic Optimization",
+                            "description": "Model alignment using Kahneman-Tversky principles for binary feedback.",
+                            "url": "https://arxiv.org/pdf/2402.01306"
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "keyTakeaway",
+            "points": [
+                "Modern LLMs use **decoder-only** Transformers, **RMSNorm**, and **SwiGLU**.",
+                "**GQA** reduces KV cache by 8x; **MLA** (DeepSeek) compresses memory footprints by up to 28x via the Weight Absorption Trick.",
+                "**PagedAttention** and **Speculative Decoding** solve critical inference speed/memory issues.",
+                "**Inference-optimal** scaling (e.g. Llama 3 at 1,875:1 ratio) beats compute-optimal for overall production costs.",
+                "**KTO** and **GRPO** extend the alignment landscape beyond DPO, enabling binary feedback and critic-free reasoning.",
+                "**FlashAttention-4** targets Blackwell GPUs; **Inference-Time Scaling** allows models to 'think longer' for better answers."
+            ]
+        },
+        {
+            "type": "references",
+            "items": [
+                {
+                    "num": 1,
+                    "text": "chapter 1.pdf",
+                    "url": ""
+                },
+                {
+                    "num": 2,
+                    "text": "DeepSeek-V3 Explained 1: Multi-head Latent Attention | by Shirley Li | TDS Archive",
+                    "url": "https://medium.com/data-science/deepseek-v3-explained-1-multi-head-latent-attention-ed6bee2a67c4"
+                },
+                {
+                    "num": 3,
+                    "text": "DeepSeek-V3 Technical Report - arXiv.org",
+                    "url": "https://arxiv.org/pdf/2412.19437"
+                },
+                {
+                    "num": 4,
+                    "text": "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning",
+                    "url": "https://arxiv.org/html/2501.12948v1"
+                },
+                {
+                    "num": 5,
+                    "text": "Multi-Head Cross Entropy Loss | Ziming Liu - GitHub Pages",
+                    "url": "https://kindxiaoming.github.io/blog/2026/multi-head-cross-entropy/"
+                },
+                {
+                    "num": 6,
+                    "text": "On the Sample Complexity of Next-Token Prediction - GitHub",
+                    "url": "https://raw.githubusercontent.com/mlresearch/v258/main/assets/yuksel25a/yuksel25a.pdf"
+                },
+                {
+                    "num": 7,
+                    "text": "A Gentle Introduction to Multi-Head Latent Attention (MLA) - MachineLearningMastery.com",
+                    "url": "https://machinelearningmastery.com/a-gentle-introduction-to-multi-head-latent-attention-mla/"
+                },
+                {
+                    "num": 8,
+                    "text": "Decoder-Only Transformer - Emergent Mind",
+                    "url": "https://www.emergentmind.com/topics/decoder-only-transformer"
+                },
+                {
+                    "num": 9,
+                    "text": "FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision - arXiv.org",
+                    "url": "https://arxiv.org/pdf/2407.08608"
+                },
+                {
+                    "num": 10,
+                    "text": "Triton Kernels - RMS Norm | Kapil Sharma",
+                    "url": "http://www.kapilsharma.dev/posts/triton-kernels-rms-norm/"
+                },
+                {
+                    "num": 11,
+                    "text": "Encoder-Decoder or Decoder-Only? Revisiting Encoder-Decoder Large Language Model - arXiv",
+                    "url": "https://arxiv.org/abs/2510.26622"
+                },
+                {
+                    "num": 12,
+                    "text": "Encoder-decoder models - Harold Benoit",
+                    "url": "https://haroldbenoit.com/notes/ml/llms/architecture/encoder-decoder-models"
+                },
+                {
+                    "num": 13,
+                    "text": "From Transformers to Mamba: A Gentle but Deep Dive | by Can Demir",
+                    "url": "https://medium.com/@candemir13/from-transformers-to-mamba-a-gentle-but-deep-dive-into-the-next-generation-of-ai-architectures-fbb118eb70af"
+                },
+                {
+                    "num": 14,
+                    "text": "Understanding the Transformer Architecture: A Deep Dive | by Rezowanur Rahman Robin",
+                    "url": "https://medium.com/@robin5002234/understanding-the-transformer-architecture-a-deep-dive-6e463f4f9649"
+                },
+                {
+                    "num": 15,
+                    "text": "DeepSeek's Multi-Head Latent Attention - Lior Sinai",
+                    "url": "https://liorsinai.github.io/machine-learning/2025/02/22/mla.html"
+                },
+                {
+                    "num": 16,
+                    "text": "Decoder-Only Transformers - Emergent Mind",
+                    "url": "https://www.emergentmind.com/topics/decoder-only-transformers-8d3ea15e-255d-46ad-96ac-dbee4d7b246a"
+                },
+                {
+                    "num": 17,
+                    "text": "DeepSeek + SGLang: Multi-Head Latent Attention — Blog - Verda",
+                    "url": "https://verda.com/blog/deepseek-sglang-multi-head-latent-attention"
+                },
+                {
+                    "num": 18,
+                    "text": "Primers: FlashAttention - Aman's AI Journal",
+                    "url": "https://aman.ai/primers/ai/flashattention/"
+                },
+                {
+                    "num": 19,
+                    "text": "Grouped-Query Attention (GQA) - rasbt/LLMs-from-scratch - GitHub",
+                    "url": "https://github.com/rasbt/LLMs-from-scratch/blob/main/ch04/04_gqa/README.md"
+                },
+                {
+                    "num": 20,
+                    "text": "Inference-Time Scaling: The New Training Frontier for AI Reasoning - Introl",
+                    "url": "https://introl.com/blog/inference-time-scaling-research-reasoning-models-december-2025"
+                },
+                {
+                    "num": 21,
+                    "text": "Beyond Chinchilla-Optimal: Accounting for Inference in Language Model Scaling Laws - GitHub",
+                    "url": "https://raw.githubusercontent.com/mlresearch/v235/main/assets/sardana24a/sardana24a.pdf"
+                },
+                {
+                    "num": 22,
+                    "text": "Revisiting LayerNorm: aka Norms are Important - Ceramic.ai",
+                    "url": "https://ceramic.ai/blog/revisiting-layernorm"
+                },
+                {
+                    "num": 23,
+                    "text": "Creating a Llama or GPT Model for Next-Token Prediction - MachineLearningMastery.com",
+                    "url": "https://machinelearningmastery.com/creating-a-llama-or-gpt-model-for-next-token-prediction/"
+                },
+                {
+                    "num": 24,
+                    "text": "Scaling Inference-Efficient Language Models - arXiv",
+                    "url": "https://arxiv.org/html/2501.18107v2"
+                },
+                {
+                    "num": 25,
+                    "text": "DeepSeek-V3 Technical Report - arXiv.org",
+                    "url": "https://arxiv.org/html/2412.19437v2"
+                },
+                {
+                    "num": 26,
+                    "text": "uygarkurt/Llama-3-PyTorch - GitHub",
+                    "url": "https://github.com/uygarkurt/Llama-3-PyTorch"
+                },
+                {
+                    "num": 27,
+                    "text": "Demystifying GQA - Grouped Query Attention for Efficient LLM Pre-training",
+                    "url": "https://towardsdatascience.com/demystifying-gqa-grouped-query-attention-3fb97b678e4a/"
+                },
+                {
+                    "num": 28,
+                    "text": "FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision | OpenReview",
+                    "url": "https://openreview.net/forum?id=tVConYid20"
+                },
+                {
+                    "num": 29,
+                    "text": "FlashAttention-4: Algorithm and Kernel Pipelining Co-Design for Asymmetric Hardware Scaling - arXiv.org",
+                    "url": "https://arxiv.org/html/2603.05451v1"
+                },
+                {
+                    "num": 30,
+                    "text": "FlashAttention-4: Algorithm and Kernel Pipelining Co-Design - Emergent Mind",
+                    "url": "https://www.emergentmind.com/papers/2603.05451"
+                },
+                {
+                    "num": 31,
+                    "text": "The Crystallization of Transformer Architectures (2017-2025) | Jun",
+                    "url": "https://jytan.net/blog/2025/transformer-architectures/"
+                },
+                {
+                    "num": 32,
+                    "text": "A Survey of Direct Preference Optimization - arXiv",
+                    "url": "https://arxiv.org/html/2503.11701v1"
+                },
+                {
+                    "num": 33,
+                    "text": "Root Mean Square Layer Normalization - OpenReview",
+                    "url": "https://openreview.net/pdf?id=SygkZ3MTJE"
+                },
+                {
+                    "num": 34,
+                    "text": "Releasing Tri-RMSNorm: Yielding Speed-up for Training Stabilization | by Dogukan Tuna",
+                    "url": "https://medium.com/@dtunai/releasing-tri-rmsnorm-yielding-speed-up-for-training-stabilization-lets-review-root-mean-8e699eab947c"
+                },
+                {
+                    "num": 35,
+                    "text": "SwiGLU: The Activation Function Powering Modern LLMs | by Saeed Mehrang",
+                    "url": "https://medium.com/@saeed.mehrang/swiglu-the-activation-function-powering-modern-llms-70ea5cfdeafe"
+                },
+                {
+                    "num": 36,
+                    "text": "Rotary Position Embedding in Transformers - Emergent Mind",
+                    "url": "https://www.emergentmind.com/topics/rotary-position-embedding-rope"
+                },
+                {
+                    "num": 37,
+                    "text": "Grouped Query Attention (GQA) vs. Multi Head Attention (MHA) - FriendliAI",
+                    "url": "https://friendli.ai/blog/gqa-vs-mha"
+                },
+                {
+                    "num": 38,
+                    "text": "FlashAttention-4: Algorithm and Kernel Pipelining Co-Design - Together AI",
+                    "url": "https://www.together.ai/blog/flashattention-4"
+                },
+                {
+                    "num": 39,
+                    "text": "Inside DeepSeek V3: Breaking Down Multi-Head Latent Attention (MLA) | by Ahabb Sheraz",
+                    "url": "https://medium.com/@ahabb/inside-deepseek-v3-breaking-down-multi-head-latent-attention-mla-72a71fa5771d"
+                },
+                {
+                    "num": 40,
+                    "text": "A Theoretical Framework for Auxiliary-Loss-Free Load Balancing of Sparse MoE - arXiv",
+                    "url": "https://arxiv.org/html/2512.03915v1"
+                },
+                {
+                    "num": 41,
+                    "text": "A Theoretical Framework for Auxiliary-Loss-Free Load Balancing of Sparse MoE - Optimization Online",
+                    "url": "https://optimization-online.org/wp-content/uploads/2025/12/main.pdf"
+                },
+                {
+                    "num": 42,
+                    "text": "How Scaling Laws Drive Smarter, More Powerful AI | NVIDIA Blog",
+                    "url": "https://blogs.nvidia.com/blog/ai-scaling-laws/"
+                },
+                {
+                    "num": 43,
+                    "text": "Summary: FlashAttention-3",
+                    "url": "https://wentao.site/flash_attention_v3_summary/"
+                },
+                {
+                    "num": 44,
+                    "text": "Direct Preference Optimization (DPO) for LLMs using TRL Library - Hamman Samuel, PhD",
+                    "url": "https://hammansamuel.medium.com/direct-preference-optimization-dpo-for-llms-using-trl-library-137ba6a77ec6"
+                },
+                {
+                    "num": 45,
+                    "text": "FlashAttention-3: Fast and Accurate Attention - Together AI",
+                    "url": "https://www.together.ai/blog/flashattention-3"
+                },
+                {
+                    "num": 46,
+                    "text": "Direct Preference Optimization: Your Language Model is Secretly a Reward Model - OpenReview",
+                    "url": "https://openreview.net/pdf?id=HPuSIXJaa9"
+                },
+                {
+                    "num": 47,
+                    "text": "Inference-Time Compute Scaling Policy Considerations - Austin R. Ellis-Mohr",
+                    "url": "https://www.austinellismohr.com/updates-blog/inference-time-compute-scaling-policy-considerations"
+                },
+                {
+                    "num": 48,
+                    "text": "Jamba: A Hybrid Transformer-Mamba Language Model - arXiv.org",
+                    "url": "https://arxiv.org/html/2403.19887v1"
+                },
+                {
+                    "num": 49,
+                    "text": "KTO: Model Alignment as Prospect Theoretic Optimization - arXiv",
+                    "url": "https://arxiv.org/pdf/2402.01306"
+                },
+                {
+                    "num": 50,
+                    "text": "KTO: Model Alignment as Prospect Theoretic Optimization - arXiv (v3)",
+                    "url": "https://arxiv.org/html/2402.01306v3"
+                },
+                {
+                    "num": 51,
+                    "text": "Understanding the DeepSeek R1 Paper - Hugging Face LLM Course",
+                    "url": "https://huggingface.co/learn/llm-course/chapter12/3"
+                },
+                {
+                    "num": 52,
+                    "text": "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs - arXiv.org",
+                    "url": "https://arxiv.org/pdf/2501.12948"
+                },
+                {
+                    "num": 53,
+                    "text": "PagedEviction: Structured Block-wise KV Cache Pruning - arXiv",
+                    "url": "https://arxiv.org/html/2509.04377v1"
+                },
+                {
+                    "num": 54,
+                    "text": "What is grouped query attention (GQA)? - IBM",
+                    "url": "https://www.ibm.com/think/topics/grouped-query-attention"
+                },
+                {
+                    "num": 55,
+                    "text": "OpenAI o1 System Card",
+                    "url": "https://openai.com/index/openai-o1-system-card/"
+                },
+                {
+                    "num": 56,
+                    "text": "How Powerful are Decoder-Only Transformer Neural Models? - arXiv.org",
+                    "url": "https://arxiv.org/html/2305.17026v3"
+                },
+                {
+                    "num": 57,
+                    "text": "AI Inference Time Scaling Laws Explained - Supermicro",
+                    "url": "https://learn-more.supermicro.com/data-center-stories/ai-inference-time-scaling-laws-explained"
+                },
+                {
+                    "num": 58,
+                    "text": "Inference Scaling Laws: An Empirical Analysis of Compute-Optimal Inference | OpenReview",
+                    "url": "https://openreview.net/forum?id=VNckp7JEHn"
+                },
+                {
+                    "num": 59,
+                    "text": "Vinija's Notes: LLM Alignment",
+                    "url": "https://vinija.ai/concepts/llm-alignment/"
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,873 @@
+{
+  "id": "ch5",
+  "title": "5. Parameter-Efficient Fine-Tuning",
+  "subtitle": "From Low-Rank Adaptation to Spectral Decomposition",
+  "icon": "✂️",
+  "color": "#9333ea",
+  "sections": [
+    {
+      "type": "intro",
+      "heading": "Deep Technical Analysis of Parameter-Efficient Fine-Tuning",
+      "body": "Large language models continue to grow from billions to trillions of parameters, quickly outpacing the memory capacity of available hardware. Full 16-bit fine-tuning of LLaMA-65B requires on the order of 780 GB of GPU memory. [1] Parameter-Efficient Fine-Tuning (PEFT) techniques (LoRA, Adapters, Prefix Tuning, QLoRA, etc.) avoid this 'memory wall' by freezing most of the base model and only learning a small set of additional parameters. [2] LoRA, which adds two low-rank matrices to each weight update, has become the default approach for LLM adaptation when throughput or hardware is limited. This chapter covers LoRA theory and variants (rsLoRA, DoRA, PiSSA), quantized approaches (QLoRA, QPiSSA), advanced factorizations (LoHa, LoKr, IA3), continual learning (SLoRA), and the LoRAM pruning technique."
+    },
+    {
+      "type": "section",
+      "id": "s5-arch",
+      "heading": "",
+      "blocks": [
+        {
+          "type": "mermaid",
+          "title": "LoRA Architecture Overview",
+          "code": "flowchart LR\n    X[Input Token or Embedding] --> W0[Base Weight Matrix W0 - Frozen]\n    W0 --> Y[Output]\n    X --> B[B matrix - r x n]\n    B --> A[A matrix - m x r]\n    A --> Y"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-1",
+      "heading": "1. The Engineering Rationale for Parameter Efficiency",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The primary driver for PEFT is the quadratic and linear scaling of memory requirements during training. In a standard Transformer architecture, the memory footprint is dominated by the weight matrices $W$ and their associated metadata. [4] While inference requires only the weight matrix itself, training necessitates the storage of weight gradients and optimizer states, which typically utilize higher precision (FP32) to maintain numerical stability during backpropagation. [5]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-1-1",
+      "heading": "1.1 The Calculus of Memory Overheads",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "For a given model with $\\Phi$ parameters, the memory requirement $M_{FFT}$ during full fine-tuning with an Adam-style optimizer can be represented as:"
+        },
+        {
+          "type": "equation",
+          "label": "FFT Memory",
+          "tex": "M_{FFT} = M_{weights} + M_{gradients} + M_{optimizer} + M_{activations}",
+          "description": "Total memory breakdown for full fine-tuning."
+        },
+        {
+          "type": "text",
+          "content": "In a typical mixed-precision setup (BF16 weights and gradients, FP32 optimizer states):"
+        },
+        {
+          "type": "equation",
+          "label": "Static Memory",
+          "tex": "M_{static} \\approx 2\\Phi \\text{ (weights)} + 2\\Phi \\text{ (gradients)} + 4\\Phi \\text{ (master weights)} + 8\\Phi \\text{ (Adam states)} = 16\\Phi \\text{ bytes}",
+          "description": "Calculates to 16 bytes per parameter."
+        },
+        {
+          "type": "text",
+          "content": "For a 70B parameter model, this equates to approximately 840 GB of VRAM, excluding activations and temporary buffers. [4] PEFT techniques reduce this requirement by freezing $W$ and optimizing a set of parameters $\\theta$ where $|\\theta| \\ll \\Phi$. The memory footprint then scales with $\\theta$ rather than $\\Phi$ for gradients and optimizer states, effectively allowing the fine-tuning of 70B models on a single or dual-GPU setup. [4]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-1-2",
+      "heading": "1.2 Hardware VRAM Footprint Comparison",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The following table provides a high-level comparison of the memory requirements for various fine-tuning strategies applied to popular model scales in 2025. [5]"
+        },
+        {
+          "type": "table",
+          "title": "Hardware VRAM Footprint",
+          "headers": ["Model Size", "Full Fine-Tuning (FP16)", "LoRA (r=64, FP16 Base)", "QLoRA (r=64, NF4 Base)"],
+          "rows": [
+            ["7B Params", "~100-120 GB", "~24-32 GB", "~12-20 GB"],
+            ["13B Params", "~200-240 GB", "~40-50 GB", "~20-30 GB"],
+            ["70B Params", "~840-900 GB", "~160-200 GB", "~48-60 GB"]
+          ]
+        },
+        {
+          "type": "text",
+          "content": "The reduction in VRAM is not merely a matter of convenience; it enables a higher effective batch size and longer sequence lengths on existing hardware, directly impacting the throughput and training stability of the adaptation process. [10]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-1-3",
+      "heading": "1.3 To LoRA or Not to LoRA",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "From the scientist's perspective, LoRA is justified by theory: it can approximate full model adaptation if the rank is sufficient, and it often converges similarly to full fine-tuning under the 'lazy training' regime. Malladi et al. (2023) show that LoRA's dynamics align with full fine-tuning on large nets, and Zeng et al. formally prove a high-rank LoRA can represent any target model under mild assumptions. [2]"
+        },
+        {
+          "type": "text",
+          "content": "From the engineer's perspective, one must weigh accuracy vs efficiency. On many tasks LoRA matches full-tuning performance when tuned well. However, for tasks requiring heavy adaptation (e.g. extreme domain shifts or math reasoning), LoRA may underperform. In such cases, either **increase the rank r** or consider augmenting LoRA with other methods (DoRA, PiSSA). Engineers often start with **r=4-16** and scale up if needed."
+        },
+        {
+          "type": "callout",
+          "style": "insight",
+          "title": "LoRA is Not a Hack",
+          "content": "LoRA is well-supported by both Neural Tangent Kernel theory and empirical results. It is now a standard tool in the ML engineer's toolkit, enabling research and deployment on hardware that could not support full-model updates. Distributed training frameworks (FSDP, DeepSpeed) also benefit from LoRA by reducing communication overhead (fewer trainable parameters to sync). [1]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-2",
+      "heading": "2. Low-Rank Adaptation (LoRA): Theory and Implementation",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "LoRA is predicated on the hypothesis that the update matrix $\\Delta W$ generated during fine-tuning exhibits a low \"intrinsic rank\". [2] This means the millions of parameters in a weight update do not change independently but follow a structured, low-dimensional pattern that can be approximated through matrix decomposition. [2]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-2-1",
+      "heading": "2.1 Mathematical Foundations of Low-Rank Updates",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "For a pre-trained weight matrix $W_0 \\in \\mathbb{R}^{d \\times k}$, LoRA constrains the weight update $\\Delta W$ by representing it as the product of two low-rank matrices $B \\in \\mathbb{R}^{d \\times r}$ and $A \\in \\mathbb{R}^{r \\times k}$, where the rank $r \\ll \\min(d, k)$. [2] The forward pass of the modified layer is:"
+        },
+        {
+          "type": "equation",
+          "label": "LoRA Forward Pass",
+          "tex": "h = W_0 x + \\Delta W x = W_0 x + B A x",
+          "description": "Applying the low-rank adapter to the input."
+        },
+        {
+          "type": "text",
+          "content": "Where $x$ is the input vector. During backpropagation, the gradient of the loss $\\mathcal{L}$ with respect to the trainable parameters $A$ and $B$ is calculated while $W_0$ remains stationary. [2]"
+        },
+        {
+          "type": "text",
+          "content": "The scaling factor $\\alpha$ is a critical engineering component. The update is scaled by $\\frac{\\alpha}{r}$ to maintain the relative magnitude of the low-rank update compared to the pre-trained weights. [17] The engineering \"why\" for this scaling is to ensure that as the rank $r$ is varied, the effective learning rate does not need to be significantly retuned. A constant $\\frac{\\alpha}{r}$ ensures that the update magnitude stays consistent, simplifying the hyperparameter sweep process. [11]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-2-2",
+      "heading": "2.2 Rank-Stabilized LoRA (rsLoRA)",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "While standard LoRA uses $\\frac{\\alpha}{r}$ scaling, theoretical analysis of the learning trajectory in the infinite-width limit indicates that this may lead to gradient collapse at higher ranks. [21] Rank-Stabilized LoRA (rsLoRA) proposes a scaling factor of:"
+        },
+        {
+          "type": "equation",
+          "label": "rsLoRA Scaling",
+          "tex": "h = W_0 x + \\frac{\\alpha}{\\sqrt{r}} B A x",
+          "description": "Rank-stabilized scaling using the square root of r."
+        },
+        {
+          "type": "text",
+          "content": "Theorem 3.2 in the rsLoRA research demonstrates that $\\frac{1}{\\sqrt{r}}$ scaling is necessary to ensure that the variance of the adapter's output and the magnitude of the backpropagated gradients remain independent of the rank $r$. [21] This allows the use of significantly higher ranks (e.g., $r=256$ or $r=512$) to improve the model's expressive capacity without the optimization instabilities typically associated with large updates. [19]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-2-3",
+      "heading": "2.3 Implementation Logic: Modular LoRA in PyTorch",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "To implement LoRA effectively, an engineer must replace standard linear layers with a wrapper that maintains the frozen pre-trained weights and the trainable low-rank path."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "import torch\nimport torch.nn as nn\nimport math\n\nclass LoRALinear(nn.Module):\n    \"\"\"\n    SOTA implementation of Low-Rank Adaptation for a Linear layer.\n    Incorporates scaling, dropout, and weight merging logic.\n    \"\"\"\n    def __init__(self, base_layer, rank=8, alpha=16, dropout=0.05):\n        super().__init__()\n        self.base_layer = base_layer # Frozen nn.Linear\n        self.rank = rank\n        self.alpha = alpha\n        self.scaling = alpha / rank\n        \n        # Matrix A: Input down-projection (random Gaussian)\n        self.lora_A = nn.Parameter(torch.zeros(rank, base_layer.in_features))\n        \n        # Matrix B: Output up-projection (zeros to ensure initial update is zero)\n        self.lora_B = nn.Parameter(torch.zeros(base_layer.out_features, rank))\n        self.dropout = nn.Dropout(p=dropout)\n        self.reset_parameters()\n        \n        # Ensure base layer is frozen\n        self.base_layer.weight.requires_grad = False\n        \n    def reset_parameters(self):\n        # Initializing A with Kaiming uniform ensures stable gradients\n        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))\n        nn.init.zeros_(self.lora_B)\n        \n    def forward(self, x):\n        # The frozen branch\n        result = self.base_layer(x)\n        # The trainable low-rank branch\n        lora_branch = self.dropout(x)\n        lora_branch = lora_branch @ self.lora_A.t()\n        lora_branch = lora_branch @ self.lora_B.t()\n        \n        return result + (lora_branch * self.scaling)\n        \n    def merge(self):\n        \"\"\"Merge LoRA weights into base layer for inference optimization.\"\"\"\n        with torch.no_grad():\n            self.base_layer.weight.data += (self.lora_B @ self.lora_A) * self.scaling"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-2-4",
+      "heading": "2.4 Data Pipeline and Memory Mapping Visual",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The following Mermaid diagram illustrates the dual-path data flow of LoRA and how memory is allocated during the training process."
+        },
+        {
+          "type": "mermaid",
+          "title": "LoRA Data Flow",
+          "code": "graph TD\n    Input --> FrozenW\n    Input --> LoraDropout\n    LoraDropout --> MatrixA\n    MatrixA --> MatrixB\n    MatrixB --> Scale\n    FrozenW --> Sum((+))\n    Scale --> Sum\n    Sum --> Output\n    \n    subgraph Memory_Allocation\n        direction TB\n        BaseMem\n        AdapterMem\n    end\n    \n    MatrixA -.-> AdapterMem\n    MatrixB -.-> AdapterMem\n    FrozenW -.-> BaseMem"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-peft-compare",
+      "heading": "3. Head-to-Head Comparisons of PEFT Methods",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "In real-world usage, engineers often compare LoRA against other PEFT strategies on metrics of accuracy, speed, and memory. The results vary by task, but general trends have emerged."
+        },
+        {
+          "type": "list",
+          "style": "detail",
+          "items": [
+            {
+              "label": "LoRA vs Adapters",
+              "detail": "Both freeze most parameters, but adapters insert new small MLP layers. Adapters allow more nonlinearity but often introduce more parameters than an equivalent-rank LoRA. Empirically, LoRA and adapters achieve similar performance with carefully tuned ranks."
+            },
+            {
+              "label": "Prefix Tuning / Prompt Tuning",
+              "detail": "These affect only the input side (prepending learnable tokens) and are very parameter-light, but often need large token lengths to match LoRA's accuracy. Useful when the model is extremely large but the task is small."
+            },
+            {
+              "label": "Full Fine-tuning",
+              "detail": "Always a baseline; tends to yield highest task accuracy but at prohibitive cost. QLoRA has blurred the line by enabling 'full-like' performance in quantized regimes."
+            },
+            {
+              "label": "Dynamic Rank (AdaLoRA, ALoRA)",
+              "detail": "Techniques like AdaLoRA or ALoRA dynamically adjust each adapter's rank during training (drop small singular values, reallocate budgets). ALoRA (NAACL 2024) prunes and regrows ranks per module, outperforming baselines with the same average parameters. [12]"
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "content": "On GPU-enabled benchmarks, LoRA often achieves **>90-95%** of full fine-tuning accuracy on language tasks while using **~1-5%** of the parameters. QLoRA reports state-of-the-art instruction-following models ('Guanaco') by combining 4-bit quantization and LoRA. [7]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-3",
+      "heading": "3.1 QLoRA: Quantization and Numerical Stability",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "While LoRA reduces the number of trainable parameters, the base model still occupies significant VRAM in its 16-bit (FP16/BF16) format. [1] QLoRA (Quantized LoRA) addresses this by storing the base model in a 4-bit format while performing computations in a higher-precision 'compute type'. [7]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-3-1",
+      "heading": "3.1 4-bit NormalFloat (NF4) Quantization",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Pre-trained weights in LLMs typically follow a zero-centered normal distribution $N(0, \\sigma^2)$. Standard 4-bit integer quantization (INT4) uses uniform spacing, which leads to high quantization error for the high-density region around zero. [24] QLoRA introduces NormalFloat (NF4), an information-theoretically optimal data type that places its 16 codebook levels according to the quantiles of a normal distribution. [23]"
+        },
+        {
+          "type": "text",
+          "content": "**Derivation of NF4 Quantiles**\nTo obtain a $k$-bit data type with equal expected values in each bin, the quantiles $q_i$ are derived from the standard normal distribution $N(0, 1)$ as follows:"
+        },
+        {
+          "type": "equation",
+          "label": "NF4 Quantiles",
+          "tex": "q_i = \\frac{1}{2} \\left( Q_X\\left(\\frac{i}{2^k + 1}\\right) + Q_X\\left(\\frac{i+1}{2^k + 1}\\right) \\right)",
+          "description": "Quantile generation for NF4."
+        },
+        {
+          "type": "text",
+          "content": "where $Q_X(\\cdot)$ is the cumulative distribution function (CDF) of the standard normal distribution. [25] For $k=4$, this results in 16 discrete levels that are optimally spaced for weight distributions. To handle the lack of an exact zero in standard quantile quantization (essential for padding and sparsity), NF4 generates two separate sets of bins for negative and positive ranges, ensuring a true zero point at the 8th bin. [27]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-3-2",
+      "heading": "3.2 Double Quantization and Metadata Optimization",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "In block-wise quantization (e.g., block size 64), a scale factor must be stored for each block. [5] For a 65B parameter model, these 32-bit scale factors can consume gigabytes of VRAM. Double Quantization treats these scale factors as a distribution and quantizes them again into 8-bit floats (FP8), reducing the average memory footprint by an additional 0.4 bits per parameter. [4]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-3-3",
+      "heading": "3.3 Hardware Implications and Efficiency Analysis",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The use of QLoRA introduces a trade-off between memory and compute. On older architectures (e.g., NVIDIA T4), computations cannot be performed directly in 4-bit, requiring on-the-fly dequantization to 16-bit before matrix multiplication. [30]"
+        },
+        {
+          "type": "table",
+          "title": "Hardware QLoRA Efficiency",
+          "headers": ["Hardware Architecture", "NF4 Support", "Inference Latency (vs FP16)", "VRAM Saving"],
+          "rows": [
+            ["NVIDIA T4 (Turing)", "No (Dequant Tax)", "82% slower", "~41%"],
+            ["NVIDIA A100 (Ampere)", "Limited", "~5-10% slower", "~75%"],
+            ["NVIDIA H100 (Hopper)", "Native FP8/INT4", "~0-5% slower", "~75%"]
+          ]
+        },
+        {
+          "type": "text",
+          "content": "The \"dequantization tax\" on the T4 is severe because the GPU must convert 4-bit weights back to 16-bit for every layer computation, which increases energy consumption and latency despite the memory savings. [30] However, on newer Hopper-based hardware (H100), the increased memory bandwidth (3.35 TB/s) and native support for low-precision arithmetic make QLoRA nearly as fast as FP16 while using 4x less VRAM. [32]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-4",
+      "heading": "4. Weight-Decomposed LoRA (DoRA): Bridging the Accuracy Gap",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "While LoRA is efficient, research indicates it lacks the nuanced learning capacity of FFT, particularly in complex domains like mathematical reasoning. [15] NVIDIA's Weight-Decomposed LoRA (DoRA) investigates this by analyzing the relationship between magnitude and direction updates. [15]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-4-1",
+      "heading": "4.1 Magnitude and Direction Decomposition",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "DoRA decomposes the pre-trained weight matrix $W$ into two components: a magnitude vector $m$ and a directional matrix $V$. [34] For a weight matrix $W \\in \\mathbb{R}^{d \\times k}$:"
+        },
+        {
+          "type": "equation",
+          "label": "DoRA Decomposition",
+          "tex": "W = m \\frac{V}{||V||_c} = m \\cdot \\hat{V}",
+          "description": "Decomposing W into magnitude and direction."
+        },
+        {
+          "type": "text",
+          "content": "where $m \\in \\mathbb{R}^{d}$ is the magnitude vector and $||V||_c$ is the vector-wise norm of the columns. [34] DoRA then updates both $m$ and $V$, but specifically employs LoRA for the directional update $\\Delta V$:"
+        },
+        {
+          "type": "equation",
+          "label": "DoRA Integration",
+          "tex": "W' = m' \\frac{V_0 + \\Delta V}{||V_0 + B A||_c}",
+          "description": "Integrating the LoRA update structurally."
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-4-2",
+      "heading": "4.2 Gradient Analysis and Learning Patterns",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The technical rationale for this decomposition is based on the observation that FFT updates magnitude and direction in a negatively correlated pattern (-0.62 correlation), whereas standard LoRA updates them in lockstep (+0.83 correlation). [34] By decoupling them, DoRA mimics the learning patterns of FFT."
+        },
+        {
+          "type": "text",
+          "content": "The gradient of the Loss $\\mathcal{L}$ with respect to the directional update $\\Delta V$ is derived as:"
+        },
+        {
+          "type": "equation",
+          "label": "Directional Gradient",
+          "tex": "\\nabla_{\\Delta V} \\mathcal{L} = \\frac{m}{||V||_c} \\left( I - \\frac{V V^T}{||V||_c^2} \\right) \\nabla_{W'} \\mathcal{L}",
+          "description": "Gradient of the directional update."
+        },
+        {
+          "type": "text",
+          "content": "The term in the parentheses acts as a projection that ensures directional updates are focused on the manifold of unit vectors, preventing the \"coupling\" that limits vanilla LoRA. [34]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-4-3",
+      "heading": "4.3 Implementation Logic: DoRA Magnitude Handling",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Implementing DoRA requires managing the magnitude vector alongside the LoRA adapters."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "class DoRALinear(nn.Module):\n    def __init__(self, base_layer, rank=8, alpha=16):\n        super().__init__()\n        self.base_layer = base_layer\n        self.rank = rank\n        self.alpha = alpha\n        \n        # Trainable magnitude vector m (initialized from base weights)\n        self.m = nn.Parameter(self.base_layer.weight.norm(p=2, dim=1, keepdim=True).t())\n        \n        # Directional LoRA adapters\n        self.lora_A = nn.Parameter(torch.zeros(rank, base_layer.in_features))\n        self.lora_B = nn.Parameter(torch.zeros(base_layer.out_features, rank))\n        nn.init.kaiming_uniform_(self.lora_A)\n        \n    def forward(self, x):\n        # Calculate the direction: (W0 + BA) normalized\n        W_directional = self.base_layer.weight + (self.lora_B @ self.lora_A) * (self.alpha / self.rank)\n        norm = W_directional.norm(p=2, dim=1, keepdim=True)\n        V_norm = W_directional / norm\n        \n        # Final weight = m * V_normalized\n        # We perform the linear operation using the decomposed weight\n        return F.linear(x, self.m.t() * V_norm, self.base_layer.bias)"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-5",
+      "heading": "5. Principal Singular Values Adaptation (PiSSA)",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "PiSSA focuses on the initialization of the adapter matrices $A$ and $B$. While LoRA initializes $B$ to zero and $A$ to Gaussian noise, PiSSA uses Singular Value Decomposition (SVD) to capture the most significant mathematical pathways of the model at the onset of training. [37]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-5-1",
+      "heading": "5.1 SVD Initialization and Residual Matrix",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "PiSSA decomposes the pre-trained weight $W_0$ into its principal component $W_{pr}$ and residual component $W_{es}$ using \"economy size\" SVD. [16]"
+        },
+        {
+          "type": "text",
+          "content": "The adapter matrices are initialized using the top $r$ singular values:"
+        },
+        {
+          "type": "equation",
+          "label": "PiSSA Initialization",
+          "tex": "W_0 = U S V^T \\implies B = U_{1:r} S_{1:r}^{1/2}, \\quad A = S_{1:r}^{1/2} V_{1:r}^T",
+          "description": "SVD-based initialization of adapters."
+        },
+        {
+          "type": "text",
+          "content": "The residual matrix $W_{es} = W_0 - BA$ is frozen during training. The technical rationale is that by directly tuning the principal components (which carry the most \"energy\" in the matrix representation), PiSSA converges faster and achieves a lower loss floor than LoRA, which must learn these directions from noise. [37]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-5-2",
+      "heading": "5.2 Quantization Error Reduction (QPiSSA)",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "A significant advantage of PiSSA is its compatibility with quantization. In QLoRA, the entire matrix $W_0$ is quantized, which destroys precision in both principal and residual components. [37] In QPiSSA, only the residual $W_{es}$ is quantized, while the principal components are kept in high-precision $A$ and $B$ matrices. [37]"
+        },
+        {
+          "type": "table",
+          "title": "Quantization Performance",
+          "headers": ["Metric", "QLoRA (LLaMA-3-70B)", "QPiSSA (LLaMA-3-70B)", "Gain"],
+          "rows": [
+            ["Quantization Error", "Baseline", "-18.97%", "Significant"],
+            ["GSM8K Accuracy", "81.73%", "86.05%", "+4.32%"]
+          ]
+        },
+        {
+          "type": "text",
+          "content": "The reduction in quantization error is a direct result of the spectral properties of weight matrices; by protecting the 'signal' (top singular values) in high precision, the 'noise' (residual) can be aggressively compressed without catastrophic impact on model logic. [37]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-spectral",
+      "heading": "5.3 Other Factorization and Spectral Methods",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "LoRA is the most famous PEFT method, but recent research explores richer factorizations and structured updates beyond dense low-rank matrices."
+        },
+        {
+          "type": "list",
+          "style": "detail",
+          "items": [
+            {
+              "label": "LoHa (Low-Rank + Hadamard)",
+              "detail": "Factorizes the update into a combination of a small matrix and a fixed Hadamard (sparse) transform, reducing parameters further."
+            },
+            {
+              "label": "LoKr (Kronecker)",
+              "detail": "Splits the update into Kronecker products of smaller matrices for extreme compression."
+            },
+            {
+              "label": "IA3",
+              "detail": "Inserts only diagonal scaling per row/column (essentially rank-1 per row), with minimal parameter overhead."
+            },
+            {
+              "label": "OrthoPE (Orthonormal PEFT)",
+              "detail": "Parameterizes adapters via orthonormal transforms (e.g. butterfly factorizations). Preserves norms and can compress further since orthogonal matrices have only $O(m \\log m)$ degrees of freedom vs $m^2$. [21]"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-loram",
+      "heading": "5.4 LoRAM: Train Small, Infer Large",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "LoRAM ('LoRA with Memory efficiency', ICLR 2025) takes LoRA further by observing that many neurons in an overparameterized LLM are redundant. Instead of training LoRA on the full model, LoRAM **prunes** the base model first and trains LoRA on this much smaller model."
+        },
+        {
+          "type": "steps",
+          "title": "LoRAM Pipeline",
+          "items": [
+            "**Prune and Fine-Tune:** Start with a large LLM (e.g. LLaMA-70B) and apply structured pruning to remove 70-90% of neurons, creating a small LLM. Then apply LoRA on this pruned model.",
+            "**Recover LoRA Matrices:** The learned low-rank matrices from the pruned model are 'recovered' and extended to the original model's dimensions.",
+            "**Alignment Pre-Training:** Optionally do a short pre-training so the remaining model weights align with the pruned ones."
+          ]
+        },
+        {
+          "type": "callout",
+          "style": "insight",
+          "title": "70B on 20GB GPU",
+          "content": "LoRAM achieves dramatic memory savings: a 70B model can be finetuned on a **20 GB GPU** (instead of an 80 GB card or 15 GPUs for standard LoRA). In QLoRAM (pruning + 4-bit quant), parameter storage cost was cut by **~16x**, with superior performance to both a full 70B and a baseline 8B-LoRA model. [16]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-slora",
+      "heading": "5.5 Stacked LoRA (SLoRA): Modular Continual Learning",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Stacked LoRA (SLoRA) addresses continual learning by adding a new LoRA adapter in parallel for each new task while freezing all previous adapters. At inference on task k, all adapter outputs up to k are summed with the base output."
+        },
+        {
+          "type": "mermaid",
+          "title": "SLoRA Architecture",
+          "code": "flowchart LR\n    subgraph Task_k\n      A[Input] --> B1[Base W - Frozen]\n      A --> L1[LoRA T1 - Frozen]\n      A --> L2[LoRA T2 - Frozen]\n      A --> L3[LoRA T3 - Training]\n      B1 --> O[Output = Base + LoRA1 + LoRA2 + LoRA3]\n      L1 --> O\n      L2 --> O\n      L3 --> O\n    end"
+        },
+        {
+          "type": "callout",
+          "style": "insight",
+          "title": "SLoRA Results",
+          "content": "On Llama-3.2B across 4 sequential tasks, SLoRA preserved prior task accuracy nearly perfectly, whereas standard LoRA lost **~30%** accuracy on earlier tasks. Training cost per task was very low: **15x faster** than full-tuning and using **99.7% fewer** trainable parameters per task. [22]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-6",
+      "heading": "6. SOTA Implementation Standards and Optimization Recipes",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Successfully deploying PEFT requires adhering to specific engineering standards derived from large-scale benchmarking. [42]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-6-1",
+      "heading": "6.1 Rank Selection and Target Modules",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Historically, engineers applied LoRA only to the Query and Value projections of the Attention mechanism. However, research from Microsoft and DeepSeek suggests that applying LoRA to all linear layers (including MLP/Feed-Forward networks) is necessary for high-rank tasks. [42]"
+        },
+        {
+          "type": "list",
+          "style": "detail",
+          "items": [
+            {
+              "label": "Optimal Rank",
+              "detail": "For simple instruction tuning, $r=8$ or $r=16$ is sufficient. For complex domain adaptation (e.g., medical or legal), $r=64$ to $r=256$ is recommended. [17]"
+            },
+            {
+              "label": "Target Modules",
+              "detail": "Standard practice now includes `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`. [43]"
+            },
+            {
+              "label": "Dropout",
+              "detail": "A dropout rate of 0.05 is standard for 7B models, while 0.1 is used for larger 70B models to mitigate overfitting on small datasets. [17]"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-6-2",
+      "heading": "6.2 Learning Rate and Batch Size Dynamics",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "LoRA training exhibits unique dynamics compared to FFT. The optimal learning rate for LoRA is typically 10x higher than for FFT. [11] This is because the low-rank path is initialized from zero (or SVD) and needs more aggressive updates to reach the target manifold. [42]"
+        },
+        {
+          "type": "table",
+          "title": "LoRA vs FFT Optimization",
+          "headers": ["Optimization Feature", "LoRA Recommendation", "FFT Recommendation"],
+          "rows": [
+            ["Learning Rate", "1e-4 to 2e-4", "1e-5 to 2e-6"],
+            ["Batch Size", "Moderate (32-128)", "High (can tolerate 512+)"],
+            ["Convergence Speed", "Fast (few epochs)", "Slow (more epochs)"]
+          ]
+        },
+        {
+          "type": "text",
+          "content": "LoRA is less tolerant of large batch sizes. Experiments show that as batch size increases, LoRA's loss floor diverges from FFT, regardless of the rank $r$. This is believed to be a fundamental limitation of the product-of-matrices ($BA$) parametrization during optimization. [42]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-6-3",
+      "heading": "6.3 Deployment Workflow",
+      "blocks": [
+        {
+          "type": "steps",
+          "title": "LoRA Deployment Pipeline",
+          "items": [
+            "**Choose Base Model and Task:** Select a suitable pretrained model (LLaMA, Mistral, BERT, etc.) and task data.",
+            "**Configure PEFT:** Decide on LoRA rank, target modules, alpha, quantization (FP16 vs 4-bit). Use `device_map='auto'` to span GPUs if needed.",
+            "**Initialize Model:** Load base model, wrap with PEFT configuration (e.g. HuggingFace PEFT's `get_peft_model`).",
+            "**Train:** Use standard training loops. Only adapter params will update. LoRA often requires fewer epochs to converge.",
+            "**Merge and Deploy:** Merge LoRA weights into the base model via `merge_and_unload()` for simplified serving, or keep separate for task-specific switching."
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-7",
+      "heading": "7. Efficiency Analysis: Multi-GPU and Large Scale",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "When fine-tuning 70B+ parameter models, single-GPU memory is insufficient even with QLoRA. Engineers must utilize Fully Sharded Data Parallelism (FSDP) or DeepSpeed Zero-Redundancy Optimizer (ZeRO). [46]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-7-1",
+      "heading": "7.1 FSDP with QLoRA",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "FSDP shards the model parameters across multiple GPUs. When combined with QLoRA, the sharding applies to the 4-bit weights. During the forward pass, each GPU gathers the necessary shard, dequantizes it to 16-bit, performs the computation, and then discards the 16-bit copy to save memory. [46]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-7-2",
+      "heading": "7.2 Throughput Benchmarks: A100 vs H100",
+      "blocks": [
+        {
+          "type": "table",
+          "title": "Throughput Benchmarks",
+          "headers": ["GPU", "Architecture", "Memory Bandwidth", "Training TPS (70B)", "Cost per 10M Tokens"],
+          "rows": [
+            ["NVIDIA A100", "Ampere", "2.0 TB/s", "~130 tokens/sec", "$6.32"],
+            ["NVIDIA H100", "Hopper", "3.35 TB/s", "~250-300 tokens/sec", "$0.88"]
+          ]
+        },
+        {
+          "type": "text",
+          "content": "The H100's Hopper architecture provides a 2.15x throughput edge over the A100 for PEFT workloads. [32] This is largely due to the 4th-gen Tensor Cores and HBM3 memory bandwidth, which allow for faster dequantization and matrix-vector operations, significantly reducing the bottleneck of weight loading. [32]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-8",
+      "heading": "8. Emerging Frontiers: Ultra-Low-Bit Adaptation",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "As of late 2025, the frontier of PEFT has moved toward sub-2-bit quantization. [48] The LowRA framework enables LoRA fine-tuning at an average of 1.15 bits per parameter. [48]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-8-1",
+      "heading": "8.1 Mechanism of LowRA",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "LowRA utilizes fine-grained quantization mapping and precision assignment, where different layers are assigned different bit-widths based on their sensitivity to quantization noise. [48]"
+        },
+        {
+          "type": "equation",
+          "label": "LowRA Average Bits",
+          "tex": "B_{avg} = \\sum_i p_i b_i",
+          "description": "Average bit calculation."
+        },
+        {
+          "type": "text",
+          "content": "where $b_i$ is the bit-width of layer $i$. LowRA demonstrates that by assigning 2-4 bits to sensitive layers (e.g., early attention layers) and 1 bit to less sensitive layers, the memory footprint can be reduced by another 50% relative to QLoRA with minimal perplexity increase. [48]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-8-2",
+      "heading": "8.2 Production Readiness and CUDA Kernels",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Standard PyTorch operations do not support 1-bit or 2-bit arithmetic natively. Production-ready LowRA and ultra-low-bit QLoRA implementations rely on custom CUDA kernels (leveraging bitsandbytes or AutoGPTQ) that pack these bits into uint8 or int32 registers and perform bit-shifting operations to dequantize during the compute loop. [49]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s5-9",
+      "heading": "9. Structural Integration and Visual Logic",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The following Mermaid diagram provides a comprehensive architectural overview of a production-grade fine-tuning system, integrating PiSSA initialization, QLoRA quantization, and DoRA weight decomposition."
+        },
+        {
+          "type": "mermaid",
+          "title": "Integrated PEFT System",
+          "code": "graph TD\n    subgraph Pre_Training_Analysis\n        SVD\n        SVD --> Principal\n        SVD --> Residual\n    end\n    \n    subgraph Memory_Hierarchy\n        direction TB\n        FrozenW\n        Adapters\n        Magnitude\n    end\n    \n    subgraph Forward_Pass_Logic\n        Input[Input x] --> Dequant\n        Input --> Lora\n        Dequant --> Sum\n        Lora --> Sum\n        Sum --> Norm[Normalize Columns]\n        Norm --> ApplyMag[Multiply by Magnitude m]\n    end\n    \n    Principal --> Adapters\n    Residual --> FrozenW\n    ApplyMag --> Output[Final Output h]"
+        },
+        {
+          "type": "text",
+          "content": "This integrated approach represents the current pinnacle of PEFT engineering. By combining spectral initialization (PiSSA) to ensure fast convergence, weight decomposition (DoRA) to match FFT learning patterns, and information-theoretic quantization (NF4) to minimize memory, an engineer can achieve performance that is virtually indistinguishable from full fine-tuning while operating within the constraints of consumer-grade hardware. [7] The ongoing evolution of custom CUDA kernels and native hardware support for FP8 and lower precisions suggests that the \"memory wall\" is not a fixed barrier, but a design constraint that can be elegantly navigated through mathematical and architectural innovation."
+        }
+      ]
+    },
+    {
+      "type": "keyTakeaway",
+      "points": [
+        "**PEFT** dramatically reduces the hardware memory 'wall' by modifying a low-rank manifold of parameters instead of the entire network. [1]",
+        "**LoRA** achieves >90-95% of full fine-tuning accuracy while using ~1-5% of the parameters; start with r=4-16 and scale up if needed.",
+        "**Rank-Stabilized LoRA (rsLoRA)** scales adapter branches via $1/\\sqrt{r}$ allowing higher rank sizes without gradient collapse. [21]",
+        "**NF4 Quantization** is information-theoretically optimal for the normal distribution of Transformer weights, enabling 4-bit storage with minimal fidelity loss. [23]",
+        "**DoRA** decouples magnitude and direction to match full fine-tuning learning patterns, especially for mathematical reasoning. [15]",
+        "**PiSSA** utilizes SVD initialization to bypass noisy starting states, achieving faster convergence (e.g. 77.7% vs 74.5% on GSM8K). [37]",
+        "**LoRAM** enables training a 70B model on a 20GB GPU by pruning + LoRA, with 16x parameter storage reduction. [16]",
+        "**SLoRA** preserves prior task accuracy in continual learning by stacking frozen adapters, with 99.7% fewer trainable parameters per task. [22]"
+      ]
+    },
+    {
+      "type": "references",
+      "items": [
+        {
+          "num": 1,
+          "text": "QLoRA: Efficient Finetuning of Quantized LLMs - NeurIPS 2023",
+          "url": "https://proceedings.neurips.cc/paper_files/paper/2023/file/1feb87871436031bdc0f2beaa62a049b-Paper-Conference.pdf"
+        },
+        {
+          "num": 2,
+          "text": "A Survey on LoRA of Large Language Models - arXiv",
+          "url": "https://arxiv.org/html/2407.11046v3"
+        },
+        {
+          "num": 3,
+          "text": "chapter 5 gpt.pdf",
+          "url": ""
+        },
+        {
+          "num": 4,
+          "text": "QLoRA: Efficient Finetuning of Quantized LLMs - NeurIPS Slides",
+          "url": "https://neurips.cc/media/neurips-2023/Slides/73855.pdf"
+        },
+        {
+          "num": 5,
+          "text": "QLoRA: Taking Fine-Tuning Efficiency to the Extreme - Medium",
+          "url": "https://medium.com/@sakethyalamanchili/qlora-taking-fine-tuning-efficiency-to-the-extreme-f82502ec4df1"
+        },
+        {
+          "num": 7,
+          "text": "LoRA - Hugging Face PEFT Documentation",
+          "url": "https://huggingface.co/docs/peft/en/package_reference/lora"
+        },
+        {
+          "num": 8,
+          "text": "Multi LoRA Image Generation - OpenVINO Documentation",
+          "url": "https://docs.openvino.ai/2024/notebooks/multilora-image-generation-with-output.html"
+        },
+        {
+          "num": 10,
+          "text": "Fine-Tuning Infrastructure: LoRA, QLoRA, and PEFT at Scale - Introl",
+          "url": "https://introl.com/blog/fine-tuning-infrastructure-lora-qlora-peft-scale-guide-2025"
+        },
+        {
+          "num": 11,
+          "text": "RL Learning with LoRA: A Diverse Deep Dive",
+          "url": "https://kalomaze.bearblog.dev/rl-lora-ddd/"
+        },
+        {
+          "num": 12,
+          "text": "ALoRA: Allocating Low-Rank Adaptation for Fine-tuning LLMs - ACL Anthology (NAACL 2024)",
+          "url": "https://aclanthology.org/2024.naacl-long.35/"
+        },
+        {
+          "num": 15,
+          "text": "DoRA: Weight-Decomposed Low-Rank Adaptation - arXiv",
+          "url": "https://arxiv.org/pdf/2402.09353"
+        },
+        {
+          "num": 16,
+          "text": "Train Small, Infer Large: Memory-Efficient LoRA Training (LoRAM) - Hugging Face Papers",
+          "url": "https://huggingface.co/papers/2502.13533"
+        },
+        {
+          "num": 17,
+          "text": "Understanding Low-Rank Adaptation (LoRA) - Hugging Face Blog",
+          "url": "https://huggingface.co/blog/Neural-Hacker/lora"
+        },
+        {
+          "num": 19,
+          "text": "Rank-Stabilized LoRA: Unlocking the Potential of LoRA Fine-Tuning - Hugging Face",
+          "url": "https://huggingface.co/blog/damjan-k/rslora"
+        },
+        {
+          "num": 21,
+          "text": "Parameter-Efficient Orthogonal Finetuning via Butterfly Factorization - arXiv",
+          "url": "https://arxiv.org/abs/2311.06243"
+        },
+        {
+          "num": 22,
+          "text": "Stacked LoRA: Isolated Low-Rank Adaptation for Lifelong Knowledge Management",
+          "url": "https://www.researchgate.net/publication/399913052_Stacked_LoRA_Isolated_Low-Rank_Adaptation_for_Lifelong_Knowledge_ManagementStacked_LoRA_Isolated_Low-Rank_Adaptation_for_Lifelong_Knowledge_Management"
+        },
+        {
+          "num": 23,
+          "text": "QLoRA: Efficient Finetuning of Quantized LLMs - OpenReview",
+          "url": "https://openreview.net/forum?id=OUIFPHEgJU"
+        },
+        {
+          "num": 25,
+          "text": "4-bit NormalFloat (NF4) Quantization - Emergent Mind",
+          "url": "https://www.emergentmind.com/topics/4-bit-normalfloat-nf4-quantization"
+        },
+        {
+          "num": 27,
+          "text": "QLoRA: Efficient Finetuning of Quantized LLMs - arXiv",
+          "url": "https://arxiv.org/abs/2305.14314"
+        },
+        {
+          "num": 30,
+          "text": "QLoRA: Quantized Low-Rank Adaptation Forward Pass - Medium",
+          "url": "https://medium.com/@indosambhav/qlora-quantized-low-rank-adaptation-forward-pass-a-deep-dive-9eeebe231a34"
+        },
+        {
+          "num": 32,
+          "text": "Comparing NVIDIA H100 vs A100 GPUs for AI Workloads - OpenMetal",
+          "url": "https://openmetal.io/resources/blog/nvidia-h100-vs-a100-gpu-comparison/"
+        },
+        {
+          "num": 34,
+          "text": "DoRA: Weight-Decomposed Low-Rank Adaptation - arXiv",
+          "url": "https://arxiv.org/abs/2402.09353"
+        },
+        {
+          "num": 37,
+          "text": "PiSSA: Principal Singular Values and Singular Vectors Adaptation - NeurIPS 2024",
+          "url": "https://proceedings.neurips.cc/paper_files/paper/2024/hash/db36f4d603cc9e3a2a5e10b93e6428f2-Abstract-Conference.html"
+        },
+        {
+          "num": 42,
+          "text": "LoRA Without Regret - Thinking Machines Lab",
+          "url": "https://thinkingmachines.ai/blog/lora/"
+        },
+        {
+          "num": 43,
+          "text": "LoRA fine-tuning Hyperparameters Guide - Unsloth",
+          "url": "https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide"
+        },
+        {
+          "num": 46,
+          "text": "DoRA: Weight-Decomposed Low-Rank Adaptation - Project Page",
+          "url": "https://nbasyl.github.io/DoRA-project-page/"
+        },
+        {
+          "num": 48,
+          "text": "LowRA: Accurate and Efficient LoRA Fine-Tuning under 2 Bits - arXiv",
+          "url": "https://arxiv.org/html/2502.08141v1"
+        }
+      ]
+    }
+  ]
+}

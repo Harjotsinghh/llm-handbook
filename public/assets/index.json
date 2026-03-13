@@ -1,0 +1,153 @@
+{
+    "meta": {
+        "title": "The Not-So-Complete (But Trying) LLM Engineer's Handbook",
+        "subtitle": "From Pretraining to High-Throughput Deployment",
+        "version": "2.0",
+        "description": "The definitive guide for training, aligning, and deploying Large Language Models at scale."
+    },
+    "chapters": [
+        {
+            "id": "ch0",
+            "title": "Learning Roadmap",
+            "subtitle": "Overview & Contents",
+            "icon": "",
+            "color": "#6366f1",
+            "file": "chapters/ch0.json"
+        },
+        {
+            "id": "ch1",
+            "group": "Foundations & Data",
+            "title": "1. Foundations of Modern LLMs",
+            "subtitle": "Tokenization, Transformer Architecture, Self-Attention & Scaling Laws",
+            "icon": "",
+            "color": "#8b5cf6",
+            "file": "chapters/ch1.json"
+        },
+        {
+            "id": "ch2",
+            "group": "Foundations & Data",
+            "title": "2. Data Engineering at Scale",
+            "subtitle": "Distributed Pipelines, Deduplication, Quality Filtering & Synthetic Data",
+            "icon": "",
+            "color": "#f59e0b",
+            "file": "chapters/ch2.json"
+        },
+        {
+            "id": "ch3",
+            "group": "Training & Fine-Tuning",
+            "title": "3. Continuous Pretraining",
+            "subtitle": "Domain Adaptation, Data Mixing & Distributed Training Infrastructure",
+            "icon": "",
+            "color": "#10b981",
+            "file": "chapters/ch3.json"
+        },
+        {
+            "id": "ch4",
+            "group": "Training & Fine-Tuning",
+            "title": "4. Supervised Fine-Tuning",
+            "subtitle": "Chat Templates, Label Masking, LoRA/QLoRA & Sequence Packing",
+            "icon": "",
+            "color": "#ec4899",
+            "file": "chapters/ch4.json"
+        },
+        {
+            "id": "ch5",
+            "group": "Training & Fine-Tuning",
+            "title": "5. Parameter-Efficient Fine-Tuning",
+            "subtitle": "LoRA, QLoRA, DoRA & PiSSA — Memory Optimization Methods",
+            "icon": "",
+            "color": "#f59e0b",
+            "file": "chapters/ch5.json"
+        },
+        {
+            "id": "ch6",
+            "group": "Alignment & Evaluation",
+            "title": "6. Preference Alignment",
+            "subtitle": "RLHF, DPO, KTO, GRPO & Reward Modeling",
+            "icon": "",
+            "color": "#8b5cf6",
+            "file": "chapters/ch6.json"
+        },
+        {
+            "id": "ch7",
+            "group": "Alignment & Evaluation",
+            "title": "7. Evaluation & Benchmarking",
+            "subtitle": "MMLU, Pass@k, Contamination Detection, LLM-as-a-Judge & Arena Rankings",
+            "icon": "",
+            "color": "#ef4444",
+            "file": "chapters/ch7.json"
+        },
+        {
+            "id": "ch8",
+            "group": "Applied Engineering",
+            "title": "8. Quantization & Training Pipelines",
+            "subtitle": "NF4, Double Quantization, QLoRA Pipelines & DPO Integration",
+            "icon": "",
+            "color": "#ec4899",
+            "file": "chapters/ch8.json"
+        },
+        {
+            "id": "ch9",
+            "group": "Applied Engineering",
+            "title": "9. The Modern LLM Stack",
+            "subtitle": "Post-DPO Alignment, Data Curation, LoRA Ecosystem & Inference Serving",
+            "icon": "",
+            "color": "#3b82f6",
+            "file": "chapters/ch9.json"
+        },
+        {
+            "id": "ch10",
+            "group": "Deployment & Inference",
+            "title": "10. Inference Serving & Memory Management",
+            "subtitle": "KV Cache, PagedAttention, Continuous Batching & Distributed Inference",
+            "icon": "",
+            "color": "#f59e0b",
+            "file": "chapters/ch10.json"
+        },
+        {
+            "id": "ch11",
+            "group": "Deployment & Inference",
+            "title": "11. Training Diagnostics & Debugging",
+            "subtitle": "CUDA OOM, VRAM Optimization, Gradient Checkpointing, ZeRO & NaN Loss",
+            "icon": "",
+            "color": "#ef4444",
+            "file": "chapters/ch11.json"
+        },
+        {
+            "id": "ch12",
+            "group": "Deployment & Inference",
+            "title": "12. LLM Inference Engineering",
+            "subtitle": "Roofline Model, KV Cache Evolution, Scheduling & Distributed Serving",
+            "icon": "",
+            "color": "#6366f1",
+            "file": "chapters/ch12.json"
+        },
+        {
+            "id": "ch13",
+            "group": "Deployment & Inference",
+            "title": "13. Inference Optimization",
+            "subtitle": "FP8 Quantization, Speculative Decoding, Medusa & Multi-LoRA Serving",
+            "icon": "",
+            "color": "#f43f5e",
+            "file": "chapters/ch13.json"
+        },
+        {
+            "id": "ch14",
+            "group": "Deployment & Inference",
+            "title": "14. Frontier Architectures & Hyperscale Training",
+            "subtitle": "Multi-Head Latent Attention, 24K GPU Clusters & Inference-Time Scaling",
+            "icon": "",
+            "color": "#0ea5e9",
+            "file": "chapters/ch14.json"
+        },
+        {
+            "id": "ch15",
+            "group": "Conclusion",
+            "title": "15. The Synthesis and Reference Ecosystem",
+            "subtitle": "End-to-End Tools, Runbooks & Conclusion",
+            "icon": "",
+            "color": "#8b5cf6",
+            "file": "chapters/ch15.json"
+        }
+    ]
+}

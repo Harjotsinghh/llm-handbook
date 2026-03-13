@@ -1,0 +1,489 @@
+{
+  "id": "ch8",
+  "title": "8. Integrated Systems Engineering for Large Language Model Training",
+  "subtitle": "From Low-Bit Quantization to Preference Alignment",
+  "icon": "⚙️",
+  "color": "#fb923c",
+  "sections": [
+    {
+      "type": "intro",
+      "heading": "Breaking the Memory Wall",
+      "body": "The rapid advancement of large language models (LLMs) between 2023 and 2026 has been characterized by a paradigm shift from brute-force full-parameter fine-tuning to sophisticated, parameter-efficient methodologies. This evolution is necessitated by the \"memory wall,\" where the scaling of model parameters has significantly outpaced the growth of available video random-access memory (VRAM) in consumer and enterprise hardware. [1] The emergence of Low-Rank Adaptation (LoRA), Quantized LoRA (QLoRA), and Direct Preference Optimization (DPO) represents a convergence of information theory, numerical optimization, and hardware-aware systems design. [3] These techniques collectively enable the adaptation of models with upwards of 70 billion parameters on single-node GPU configurations, preserving the high-fidelity performance of 16-bit training while reducing memory requirements by an order of magnitude. [3]"
+    },
+    {
+      "type": "section",
+      "id": "s8-1",
+      "heading": "1. Theoretical Foundations of 4-bit NormalFloat Quantization",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "At the core of memory-efficient fine-tuning is the 4-bit NormalFloat (NF4) data type, an information-theoretically optimal representation designed specifically for the statistical distribution of neural network weights. [8] Traditional quantization methods, such as INT8 or INT4, often rely on uniform spacing that fails to capture the nuances of weight distributions, which in pre-trained transformers tend to follow a zero-centered Gaussian or normal distribution. [9] NF4 addresses this suboptimality by leveraging quantile quantization, ensuring that each quantization bin contains an equal probability mass from the input tensor. [8]"
+        },
+        {
+          "type": "text",
+          "content": "The mathematical derivation of NF4 begins with the assumption that weights $W$ follow a normal distribution $N(0, \\sigma^2)$. By scaling $W$ to fit a specific range, these weights can be mapped to a standard normal distribution $N(0, 1)$. [8] For a $k$-bit quantization, the process determines $2^k$ values (quantiles) that partition the distribution into equiprobable intervals. [8] For NF4, where $k = 4$, the distribution is divided into 16 bins. The bin representative $q_i$ for $i \\in [0, 15]$ is defined as the mean of the quantiles:"
+        },
+        {
+          "type": "equation",
+          "label": "NF4 Bin Definition",
+          "tex": "q_i = \\frac{1}{2} \\left( Q\\left(\\frac{i}{17}\\right) + Q\\left(\\frac{i+1}{17}\\right) \\right)",
+          "description": "Quantile assignment matching standard normal distributions."
+        },
+        {
+          "type": "text",
+          "content": "Where $Q$ denotes the quantile function. The division by 17 provides 17 boundaries for the 16 bins, ensuring that the representational capacity is distributed where the weight density is highest—near the mean. [9]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s8-1-1",
+      "heading": "1.1 Comparative Analysis of 4-bit Representation Formats",
+      "blocks": [
+        {
+          "type": "table",
+          "title": "4-bit Matrix Formats",
+          "headers": ["Feature", "INT4 (Uniform)", "FP4 (E2M1)", "NF4 (NormalFloat)"],
+          "rows": [
+            ["Spacing", "Linear/Uniform", "Exponential", "Non-uniform (Gaussian)"],
+            ["Zero Representation", "Exact", "Not always exact", "Exact"],
+            ["Error Minimization", "Minimizes absolute error", "Preserves dynamic range", "Minimizes MSE for normal data"],
+            ["Distribution Fit", "Poor for Gaussian", "Moderate", "Optimal for Gaussian"],
+            ["Hardware Support", "Native (most GPUs)", "Emerging (Blackwell)", "Table-driven/Emulated"]
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s8-2",
+      "heading": "2. Double Quantization and Hierarchical Memory Management",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "While NF4 significantly reduces weight storage, the metadata required for quantization—specifically the $c^{FP32}$ scaling factors—introduces its own memory overhead. [3] In standard block-wise quantization with a block size of 64, each block requires a 32-bit float constant, adding approximately 0.5 bits per parameter to the total footprint. [8] Double Quantization (DQ) addresses this by treating the first-level quantization constants as inputs for a second round of quantization. [3] These constants are grouped into larger blocks and quantized into 8-bit floats (FP8). [8]"
+        },
+        {
+          "type": "equation",
+          "label": "Double Quantization Cost",
+          "tex": "\\text{Storage Cost} = \\frac{32}{64 \\times 256} + \\frac{8}{64} \\approx 0.127 \\text{ bits/param}",
+          "description": "Hierarchical memory reduction computation."
+        },
+        {
+          "type": "text",
+          "content": "Complementing these are paged optimizers, which leverage NVIDIA Unified Memory to prevent OOM errors during the training of large models. [3] Paged optimizers treat GPU VRAM as a cache for CPU RAM, aggressively offloading optimizer states during sequential layers and backpropagation. [15]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s8-3",
+      "heading": "3. Low-Rank Adaptation (LoRA) and the Intrinsic Dimension",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The engineering of fine-tuning pipelines is grounded in the theory of \"intrinsic dimensionality,\" which suggests that the updates required for a pre-trained model to adapt to a new task reside in a much lower-dimensional subspace than the full parameter space. [17] LoRA operationalizes this by freezing the pre-trained weight matrix $W_0 \\in \\mathbb{R}^{d \\times k}$ and representing the update $\\Delta W$ as a product of two low-rank matrices $B \\in \\mathbb{R}^{d \\times r}$ and $A \\in \\mathbb{R}^{r \\times k}$, where the rank $r \\ll \\min(d, k)$. [17]"
+        },
+        {
+          "type": "equation",
+          "label": "LoRA Forward Pass",
+          "tex": "h = W_0 x + \\Delta W x = W_0 x + B A x",
+          "description": "Matrix dimension mapping during an adapter forward pass."
+        },
+        {
+          "type": "text",
+          "content": "A scaling factor $\\alpha$ is applied to the LoRA branch to control the magnitude of the update: $\\frac{\\alpha}{r}$. The rationale for the $1/r$ scaling is to maintain the stability of the weights' variance as the rank $r$ is varied. [17]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s8-3-1",
+      "heading": "3.1 LoRA Hyperparameter Optimization and Impact",
+      "blocks": [
+        {
+          "type": "table",
+          "title": "LoRA Tuning Guide",
+          "headers": ["Hyperparameter", "Typical Range", "Recommended Value", "Strategic Impact"],
+          "rows": [
+            ["Rank ($r$)", "1 to 256", "8 to 64", "Controls model capacity vs. VRAM usage"],
+            ["Alpha ($\\alpha$)", "1 to 512", "$\\alpha = r$ or $\\alpha = 2r$", "Scales the update magnitude; stabilizes LR"],
+            ["Dropout", "0.0 to 0.1", "0.05", "Prevents overfitting on small datasets"],
+            ["Target Modules", "Attn only to All Linear", "All Linear", "Determines the \"intelligence\" of the adapter"]
+          ]
+        },
+        {
+          "type": "text",
+          "content": "Research indicates targeting all linear layers (including feed-forward networks) captures significantly more complex reasoning patterns than targeting only attention matrices. [21] Expanding target modules allows models to pick up domain-specific knowledge acquisition far faster. [19]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s8-4",
+      "heading": "4. Applied Engineering: Supervised Fine-Tuning (SFT) Pipelines",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Modern SFT pipelines rely on structured data handling and specific token masking to ensure the model learns to follow instructions without \"forgetting\" its foundational capabilities. [24] Data preparation often involves formatting raw conversation JSONs into ChatML templates via `apply_chat_template`. [26] The most critical technical component is the `DataCollatorForCompletionOnlyLM`, which sets labels preceding the assistant response to -100 so `CrossEntropyLoss` ignores them. [26]"
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "# Logit shifting inside DataCollatorForCompletionOnlyLM\n# During loss calculation, the logits and labels are shifted:\nshift_logits = logits[..., :-1, :].contiguous()\nshift_labels = labels[..., 1:].contiguous()\n\n# Because tokens masked with -100 are ignored by CrossEntropyLoss,\n# the gradient updates are driven solely by the completion tokens."
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s8-5",
+      "heading": "5. Architectural Innovations: Mistral-7B and Context Scaling",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The hardware efficiency of fine-tuning pipelines is significantly enhanced by model-specific architectural features, most notably Grouped-Query Attention (GQA) and Sliding Window Attention (SWA). [24] GQA reduces KV cache memory requirement by sharing heads, while SWA implements a fixed-size local attending window to reduce $O(L^2)$ computation cost down to $O(L \\times W)$. [33]"
+        },
+        {
+          "type": "table",
+          "title": "Mistral-7B Key Architectural Parameters",
+          "headers": ["Parameter", "Value"],
+          "rows": [
+            ["Layers", "32"],
+            ["Model Dimension ($d_{model}$)", "4096"],
+            ["Attention Heads ($n_{heads}$)", "32"],
+            ["KV Heads ($n_{kv}$)", "8"],
+            ["FFN Dimension", "14,336"],
+            ["Sliding Window ($W$)", "4096"],
+            ["Max Context", "32,768 (effectively via SWA)"]
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s8-6",
+      "heading": "6. Preference Alignment: DPO Mathematical Derivation",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Direct Preference Optimization (DPO) bypasses massive PPO clusters by realizing the optimal policy $\\pi^∗$ and latent reward $r^∗$ are mathematically interlinked. [5]"
+        },
+        {
+          "type": "equation",
+          "label": "Implicit Reward Mapping",
+          "tex": "r(x, y) = \\beta \\log \\frac{\\pi^*(y | x)}{\\pi_{ref}(y | x)} + \\beta \\log Z(x)",
+          "description": "Mapping policy ratios back into a reward function surrogate."
+        },
+        {
+          "type": "equation",
+          "label": "DPO Loss Transformation",
+          "tex": "\\mathcal{L}_{DPO}(\\pi_\\theta ; \\pi_{ref}) = -\\mathbb{E}_{(x, y_w, y_l)} \\left[ \\log \\sigma \\left( \\beta \\log \\frac{\\pi_\\theta(y_w | x)}{\\pi_{ref}(y_w | x)} - \\beta \\log \\frac{\\pi_\\theta(y_l | x)}{\\pi_{ref}(y_l | x)} \\right) \\right]",
+          "description": "Standard DPO objective optimizing direct preference datasets."
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s8-7",
+      "heading": "7. Hardware Economics and Inference Bottlenecks",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The transition to 4-bit precision formats is driven by the limits of memory bandwidth. [1] LLM inference is fundamentally divided into two phases: prefill (compute-bound) and decode (memory-bound). [2]"
+        },
+        {
+          "type": "table",
+          "title": "VRAM Footprint Analysis (7B Model)",
+          "headers": ["Component", "Full FT (FP16)", "LoRA (FP16 Base)", "QLoRA (NF4 Base)"],
+          "rows": [
+            ["Base Model Weights", "14 GB", "14 GB", "3.5 GB"],
+            ["Trainable Params", "14 GB", "0.2 GB", "0.2 GB"],
+            ["Gradients", "14 GB", "0.2 GB", "0.2 GB"],
+            ["Optimizer States", "56 GB (AdamW)", "0.8 GB", "0.8 GB"],
+            ["Activations", "~10 GB", "~10 GB", "~10 GB"],
+            ["Total VRAM Needed", "108 GB+", "25-30 GB", "15-18 GB"]
+          ]
+        }
+      ]
+    },
+    {
+      "type": "keyTakeaway",
+      "points": [
+        "**NF4 Quantization:** Use 4-bit NormalFloat instead of standard INT4; it optimally maps parameters on a Gaussian normal distribution to maximize LLM weight fidelity. [9]",
+        "**Double Quantization Memory Tricks:** Activating DQ saves another 0.3 GB on top of NF4 per billion parameters by recursively quantizing the scaling block constants themselves! [8]",
+        "**Completion Only Data Masking:** Never penalize an AI for the user's prompt text during instruction tuning. ALWAYS use the `DataCollatorForCompletionOnlyLM` to set context labels to `-100` before gradient execution! [26]",
+        "**Sliding Window Attention (SWA):** Optimize KV caches by enforcing limits where each token only cross attends to the immediate preceding boundary in deeper neural layers. [33]"
+      ]
+    },
+    {
+      "type": "references",
+      "items": [
+        {
+          "num": 1,
+          "text": "Ultimate Guide to LLM Inference Optimization - Latitude",
+          "url": "https://latitude.so/blog/ultimate-guide-to-llm-inference-optimization"
+        },
+        {
+          "num": 2,
+          "text": "Why Your LLM Is Slow: The Memory Bottleneck Nobody Talks About | by Sunil Kumawat",
+          "url": "https://medium.com/@Sunil_Kumawat/why-your-llm-is-slow-the-memory-bottleneck-nobody-talks-about-015ce03a5b63"
+        },
+        {
+          "num": 3,
+          "text": "QLORA: Efficient Finetuning of Quantized LLMs - NeurIPS",
+          "url": "https://proceedings.neurips.cc/paper_files/paper/2023/file/1feb87871436031bdc0f2beaa62a049b-Paper-Conference.pdf"
+        },
+        {
+          "num": 4,
+          "text": "LoRA vs QLoRA: Best AI Model Fine-Tuning Platforms & Tools 2026 | Index.dev",
+          "url": "https://www.index.dev/blog/top-ai-fine-tuning-tools-lora-vs-qlora-vs-full"
+        },
+        {
+          "num": 5,
+          "text": "Deriving the DPO Loss from First Principles - Hugging Face",
+          "url": "https://huggingface.co/blog/garg-aayush/derive-dpo-loss"
+        },
+        {
+          "num": 6,
+          "text": "Fine-Tuning Infrastructure: LoRA, QLoRA, and PEFT at Scale | Introl Blog",
+          "url": "https://introl.com/blog/fine-tuning-infrastructure-lora-qlora-peft-scale-guide-2025"
+        },
+        {
+          "num": 7,
+          "text": "LoRA and QLoRA: Efficient Fine-Tuning for Large Language Models | WaterCrawl Blog",
+          "url": "https://watercrawl.dev/blog/LoRA-and-QLoRA"
+        },
+        {
+          "num": 8,
+          "text": "arXiv:2305.14314v1 [cs.LG] 23 May 2023 - arXiv.org",
+          "url": "https://arxiv.org/abs/2305.14314"
+        },
+        {
+          "num": 9,
+          "text": "4-bit NormalFloat (NF4) Quantization - Emergent Mind",
+          "url": "https://www.emergentmind.com/topics/4-bit-normalfloat-nf4-quantization"
+        },
+        {
+          "num": 10,
+          "text": "Breaking Down the \u201cThings\u201d Behind QLoRA | by Shubham - Medium",
+          "url": "https://medium.com/@smishraonline16/breaking-down-the-things-behind-qlora-436c7fc2a49b"
+        },
+        {
+          "num": 11,
+          "text": "NormalFloat-4 (NF4): 4-bit Quantization - Emergent Mind",
+          "url": "https://www.emergentmind.com/topics/normalfloat-4-nf4"
+        },
+        {
+          "num": 12,
+          "text": "How to correctly compute the 16 quantization levels for NF4 (NormalFloat4) from QLoRA? [Discussion] : r/MachineLearning - Reddit",
+          "url": "https://www.reddit.com/r/MachineLearning/comments/1ifjxhx/how_to_correctly_compute_the_16_quantization/"
+        },
+        {
+          "num": 13,
+          "text": "[2306.06965] NF4 Isn't Information Theoretically Optimal (and that's Good) - ar5iv",
+          "url": "https://ar5iv.labs.arxiv.org/html/2306.06965"
+        },
+        {
+          "num": 14,
+          "text": "NF4: 4-bit NormalFloat in Neural Quantization - Emergent Mind",
+          "url": "https://www.emergentmind.com/topics/4-bit-normalfloat-nf4"
+        },
+        {
+          "num": 15,
+          "text": "Introduction: 8-bit optimizers - Hugging Face",
+          "url": "https://huggingface.co/docs/bitsandbytes/v0.43.0/optimizers"
+        },
+        {
+          "num": 16,
+          "text": "Making LLMs even more accessible with bitsandbytes, 4-bit ...",
+          "url": "https://huggingface.co/blog/4bit-transformers-bitsandbytes"
+        },
+        {
+          "num": 17,
+          "text": "Understanding LoRA: Low Rank Adaptation | by Vikram Pande - Medium",
+          "url": "https://medium.com/@vikrampande783/understanding-lora-low-rank-adaptation-563978253d6e"
+        },
+        {
+          "num": 18,
+          "text": "Understanding Low-Rank Adaptation (LoRA): A Revolution in Fine-Tuning Large Language Models - Hugging Face",
+          "url": "https://huggingface.co/blog/Neural-Hacker/lora"
+        },
+        {
+          "num": 19,
+          "text": "Optimizing Foundation Models: LoRA, MoE, and Beyond | by Emad Ghadirian | Medium",
+          "url": "https://medium.com/@emad.ghadirian/optimizing-foundation-models-lora-moe-and-beyond-54c0c0964e19"
+        },
+        {
+          "num": 20,
+          "text": "Clarification to Lora paper - finetuning alpha - Generative AI with Large Language Models",
+          "url": "https://community.deeplearning.ai/t/clarification-to-lora-paper-finetuning-alpha/417123"
+        },
+        {
+          "num": 21,
+          "text": "LoRA fine-tuning Hyperparameters Guide | Unsloth Documentation",
+          "url": "https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide"
+        },
+        {
+          "num": 22,
+          "text": "LoRA+: Efficient Low Rank Adaptation of Large Models - arXiv.org",
+          "url": "https://arxiv.org/abs/2402.12354"
+        },
+        {
+          "num": 23,
+          "text": "LoRA Without Regret - Hugging Face",
+          "url": "https://huggingface.co/docs/trl/lora_without_regret"
+        },
+        {
+          "num": 24,
+          "text": "Fine-Tune Mistral-7B with LoRA A Quickstart Guide - DigitalOcean",
+          "url": "https://www.digitalocean.com/community/tutorials/mistral-7b-fine-tuning"
+        },
+        {
+          "num": 25,
+          "text": "LLM Fine-Tuning Architecture: Methods, Best Practices & Challenges | SaM Solutions",
+          "url": "https://sam-solutions.com/blog/llm-fine-tuning-architecture/"
+        },
+        {
+          "num": 26,
+          "text": "chapter 8 traingin pieplines.pdf",
+          "url": ""
+        },
+        {
+          "num": 27,
+          "text": "How TRL DataCollatorForCompletionOnlyLM works - gists \u00b7 GitHub",
+          "url": "https://gist.github.com/Blaizzy/40de0f6b4340490e3920db9e182e6455"
+        },
+        {
+          "num": 28,
+          "text": "[DataCollatorForCompletionOnlyLM] Are the input_ids supposed to contain the labels? \u00b7 Issue #632 \u00b7 huggingface/trl - GitHub",
+          "url": "https://github.com/huggingface/trl/issues/632"
+        },
+        {
+          "num": 29,
+          "text": "Use DataCollatorForCompletionOnlyLM in order to train LLM to follow instructions \u00b7 Issue #845 \u00b7 huggingface/course - GitHub",
+          "url": "https://github.com/huggingface/course/issues/845"
+        },
+        {
+          "num": 30,
+          "text": "DataCollatorForCompletionOnly",
+          "url": "https://github.com/huggingface/trl/issues/976"
+        },
+        {
+          "num": 31,
+          "text": "To Mask or Not to Mask: The Effect of Prompt Tokens on Instruction Tuning",
+          "url": "https://towardsdatascience.com/to-mask-or-not-to-mask-the-effect-of-prompt-tokens-on-instruction-tuning-016f85fd67f4/"
+        },
+        {
+          "num": 32,
+          "text": "Unleashing the Power of Mistral 7B: Step by Step Efficient Fine-Tuning for Medical QA Chatbot | by Arash Nicoomanesh | Medium",
+          "url": "https://medium.com/@anicomanesh/unleashing-the-power-of-mistral-7b-efficient-fine-tuning-for-medical-qa-fb3afaaa36e4"
+        },
+        {
+          "num": 33,
+          "text": "Mistral-7B: Efficient Open Transformer - Emergent Mind",
+          "url": "https://www.emergentmind.com/topics/mistral-7b-model"
+        },
+        {
+          "num": 34,
+          "text": "Mistral 7B - GitHub",
+          "url": "https://raw.githubusercontent.com/mistralai/cookbook/main/mistral/ocr/mistral7b.pdf"
+        },
+        {
+          "num": 35,
+          "text": "Mistral 7B",
+          "url": "https://mistral.ai/news/announcing-mistral-7b/"
+        },
+        {
+          "num": 36,
+          "text": "How I Fine-Tuned Mistral for a Legal Chatbot in 4 Hours Using LoRA - GoPenAI",
+          "url": "https://blog.gopenai.com/how-i-fine-tuned-mistral-for-a-legal-chatbot-in-4-hours-using-lora-6bc8f0ba7843"
+        },
+        {
+          "num": 37,
+          "text": "Efficient LLM Fine-tuning with LoRA and QLoRA | Ashish Gore",
+          "url": "https://ashishgore.com/blogs/llm-finetuning-lora-qlora"
+        },
+        {
+          "num": 38,
+          "text": "DPO vs PPO for LLMs: Key Differences & Use Cases - Clarifai",
+          "url": "https://www.clarifai.com/blog/dpo-vs-ppo"
+        },
+        {
+          "num": 39,
+          "text": "Following up on my PPO derivation \u2013 I worked through DPO (Direct Preference Optimization) from first principles : r/LocalLLaMA - Reddit",
+          "url": "https://www.reddit.com/r/LocalLLaMA/comments/1pzko2m/following_up_on_my_ppo_derivation_i_worked/"
+        },
+        {
+          "num": 40,
+          "text": "Preference Tuning LLMs: PPO, DPO, GRPO \u2014 A Simple Guide | by Anukriti Ranjan",
+          "url": "https://anukriti-ranjan.medium.com/preference-tuning-llms-ppo-dpo-grpo-a-simple-guide-135765c87090"
+        },
+        {
+          "num": 41,
+          "text": "Unpacking DPO and PPO: Disentangling Best Practices for Learning from Preference Feedback - NIPS",
+          "url": "https://proceedings.neurips.cc/paper_files/paper/2024/file/404df2480b6eef0486a1679e371894b0-Paper-Conference.pdf"
+        },
+        {
+          "num": 42,
+          "text": "Quantized Local LLMs: 4-bit vs 8-bit Performance Analysis | SitePoint",
+          "url": "https://www.sitepoint.com/quantized-local-llms-4bit-vs-8bit-analysis/"
+        },
+        {
+          "num": 43,
+          "text": "LoRA vs QLoRA vs Full Fine-tuning: Which Approach Should You Choose? - Medium",
+          "url": "https://medium.com/@rkuma18/lora-vs-qlora-vs-full-fine-tuning-which-approach-should-you-choose-3fe9c21474ec"
+        },
+        {
+          "num": 44,
+          "text": "GPU Memory Requirements for LLMs: VRAM Calculator and Sizing Guide | Spheron Blog",
+          "url": "https://www.spheron.network/blog/gpu-memory-requirements-llm/"
+        },
+        {
+          "num": 45,
+          "text": "LLM Quantization: BF16 vs FP8 vs INT4 - AIMultiple",
+          "url": "https://research.aimultiple.com/llm-quantization/"
+        },
+        {
+          "num": 46,
+          "text": "Introducing NVFP4 for Efficient and Accurate Low-Precision Inference | NVIDIA Technical Blog",
+          "url": "https://developer.nvidia.com/blog/introducing-nvfp4-for-efficient-and-accurate-low-precision-inference/"
+        },
+        {
+          "num": 47,
+          "text": "Pretraining Large Language Models with NVFP4 - nvidia - arXiv",
+          "url": "https://arxiv.org/html/2509.25149v1"
+        },
+        {
+          "num": 48,
+          "text": "Using NVFP4 Low-Precision Model Training for Higher Throughput Without Losing Accuracy",
+          "url": "https://developer.nvidia.com/blog/using-nvfp4-low-precision-model-training-for-higher-throughput-without-losing-accuracy/"
+        },
+        {
+          "num": 49,
+          "text": "5 Data & AI Engineering Trends in 2026 - applydata",
+          "url": "https://applydata.io/5-data-ai-engineering-trends/"
+        },
+        {
+          "num": 50,
+          "text": "Fine-Tuning Magistral: A Step-By-Step Guide - DataCamp",
+          "url": "https://www.datacamp.com/tutorial/fine-tuning-magistral"
+        },
+        {
+          "num": 51,
+          "text": "Train & Finetune LLama3 using LLama-Factory - DigitalOcean",
+          "url": "https://www.digitalocean.com/community/tutorials/fine-tune-llama-3"
+        },
+        {
+          "num": 52,
+          "text": "What are the current (December 2025) best guides to fine-tuning? : r/LocalLLaMA - Reddit",
+          "url": "https://www.reddit.com/r/LocalLLaMA/comments/1pmfalp/what_are_the_current_december_2025_best_guides_to/"
+        },
+        {
+          "num": 53,
+          "text": "Natural Language Processing with Deep Learning CS224N/Ling284 - Stanford University",
+          "url": "https://web.stanford.edu/class/cs224n/slides_w26/cs224n-2026-lecture13-reasoning-part2.pdf"
+        }
+      ]
+    }
+  ]
+}

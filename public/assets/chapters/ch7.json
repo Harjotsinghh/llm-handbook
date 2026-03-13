@@ -1,0 +1,728 @@
+{
+  "id": "ch7",
+  "title": "7. Engineering Large Language Model Evaluation",
+  "subtitle": "A Technical Runbook for Systematic Validation and Benchmarking",
+  "icon": "🧪",
+  "color": "#e11d48",
+  "sections": [
+    {
+      "type": "intro",
+      "heading": "From Classification to High-Dimensional Verification",
+      "body": "The transformation of large language model (LLM) performance assessment from a discrete classification task to a high-dimensional probabilistic verification challenge necessitates a fundamental shift in engineering methodologies. While traditional machine learning relied upon static ground-truth labels and standard metrics such as accuracy, F1-score, and area under the curve, the open-ended nature of generative intelligence introduces subjectivity and infinite output distributions. [1] Evaluating whether a model is \"smarter\" or more \"aligned\" requires an intricate synthesis of statistical estimators, rigorous data integrity protocols, and hardware-aware inference optimizations to bridge the gap between high-level theory and implementation-level engineering. [2]"
+    },
+    {
+      "type": "section",
+      "id": "s7-1",
+      "heading": "1. Discretized Knowledge Assessment via Automated Benchmarking",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Standardized multiple-choice benchmarks provide the first line of defense in the evaluation pipeline by discretizing the continuous linguistic space of an LLM into measurable tokens. The technical rationale for utilizing multiple-choice questions (MCQs) centers on the elimination of parsing ambiguity. By constraining the model's output to a finite set of tokens—typically \"A, B, C, or D\"—engineers can programmatically measure knowledge retrieval with high precision and low computational overhead. [1]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-1-1",
+      "heading": "1.1 Massive Multitask Language Understanding (MMLU)",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The MMLU benchmark remains the industry's gold standard for general knowledge assessment, covering 57 subjects across STEM, the humanities, and the social sciences. [4] The engineering importance of MMLU lies in its ability to measure a model's breadth of world knowledge and its capacity for concrete thinking and knowledge consolidation. [4] Current state-of-the-art (SOTA) implementation standards, such as those utilized by Meta for Llama-3.1, involve 5-shot configurations for pre-trained models to stabilize the output distribution. [5]"
+        },
+        {
+          "type": "text",
+          "content": "The mathematical foundation of MMLU scoring typically relies on log-likelihood comparison. Rather than allowing the model to generate text autoregressively and parsing the result, engineers inspect the model’s internal probability distribution for specific choice tokens at the first generated position. [5] This is governed by the softmax layer of the transformer, which produces a probability $P(t_i | X)$ for each token $t_i$ in the vocabulary $V$ given the input context $X$:"
+        },
+        {
+          "type": "equation",
+          "label": "Softmax Probability",
+          "tex": "P(t_i | X) = \\frac{\\exp(z_i)}{\\sum_{j \\in V} \\exp(z_j)}",
+          "description": "Probability distribution function of the choices."
+        },
+        {
+          "type": "text",
+          "content": "Where $z$ represents the raw logits. By isolating the logits for tokens corresponding to \"A\", \"B\", \"C\", and \"D\", the evaluator selects the index with the maximum log-probability, ensuring the evaluation is immune to the model's stylistic variations or its tendency to provide conversational filler. [6]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-1-2",
+      "heading": "1.2 Multi-Step Logic and GSM8K",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "While MMLU tests knowledge retrieval, the Grade School Math 8K (GSM8K) dataset assesses the model's multi-step reasoning capabilities. The technical requirement for GSM8K is the implementation of Chain of Thought (CoT) prompting. [1] Without CoT, models often fail to map complex word problems to numerical answers because the underlying attention mechanisms struggle to maintain long-range dependencies across implicit intermediate calculations. [4]"
+        },
+        {
+          "type": "text",
+          "content": "Engineers utilize \"greedy decoding\" or \"majority voting\" (Self-Consistency) for GSM8K. In Self-Consistency, the model generates $N$ independent reasoning paths, and the most frequent final answer is selected as the ground truth. This leverages the probabilistic diversity of the model, where the expected accuracy $A_N$ across $N$ paths improves as:"
+        },
+        {
+          "type": "equation",
+          "label": "Majority Voting Expectation",
+          "tex": "A_N \\approx 1 - (1 - p_{single})^N",
+          "description": "Probability of at least one right path being chosen in large N."
+        },
+        {
+          "type": "text",
+          "content": "Where $p_{single}$ is the probability of a single path being correct. This method significantly reduces variance in reasoning tasks. [8]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-1-3",
+      "heading": "1.3 MMLU Evaluation Pipeline Logic",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The following PyTorch snippet demonstrates the SOTA implementation of log-likelihood scoring for multiple-choice benchmarks. This logic bypasses the `model.generate()` overhead and directly probes the model's internal state for decision-making."
+        },
+        {
+          "type": "code",
+          "language": "python",
+          "code": "import torch\nimport torch.nn.functional as F\nfrom transformers import AutoModelForCausalLM, AutoTokenizer\n\ndef evaluate_mmlu_logprobs(model, tokenizer, prompt, choices=['A', 'B', 'C', 'D']):\n    \"\"\"\n    Directly evaluates the probability of answer choices.\n    Rationale: Avoids non-deterministic parsing and generation noise.\n    \"\"\"\n    inputs = tokenizer(prompt, return_tensors=\"pt\").to(model.device)\n    \n    # Perform forward pass and extract logits for the final token\n    with torch.no_grad():\n        outputs = model(**inputs)\n        # Shape: [batch, sequence_length, vocab_size]\n        last_token_logits = outputs.logits[:, -1, :]\n        \n    # Map letters to their corresponding token IDs\n    # Prepending a space is critical for Llama/GPT-based tokenizers\n    choice_ids = [tokenizer.encode(f\" {c}\", add_special_tokens=False)[-1] for c in choices]\n    \n    # Filter logits for choice tokens and apply log_softmax\n    choice_logits = last_token_logits[0, choice_ids]\n    choice_log_probs = F.log_softmax(choice_logits, dim=0)\n    \n    # Engineering Metric: Return max prob and the full distribution\n    prediction = choices[torch.argmax(choice_log_probs).item()]\n    return prediction, choice_log_probs.cpu().numpy()\n    \n    # Hardware Implication:\n    # This approach is memory-efficient because it only requires\n    # a single forward pass without the autoregressive KV cache growth."
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-2",
+      "heading": "2. Functional Correctness in Code Generation",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Measuring code generation performance through benchmarks like HumanEval requires a transition from textual similarity metrics (like BLEU or ROUGE) to execution-based verification. [10] Textual overlap is a poor proxy for code correctness because a single character change in syntax (e.g., `=` vs `==`) can result in total functional failure while maintaining high string similarity. [12]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-2-1",
+      "heading": "2.1 The Pass@k Metric and Its Unbiased Estimator",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The Pass@k metric quantifies the probability that at least one of $k$ generated code samples for a specific problem passes its unit tests. [10] Historically, computing this via simple sampling was high-variance and computationally expensive. [3] In 2021, the OpenAI Codex team introduced a derivation for a low-variance, unbiased estimator that calculates Pass@k from a single larger pool of $n$ samples. [8]"
+        },
+        {
+          "type": "text",
+          "content": "Given $n$ generated samples for a problem, where $c$ samples are verified as correct through unit tests, the probability that a random subset of size $k$ contains at least one correct sample is derived as the complement of the probability that all $k$ samples in the subset are incorrect. [8]"
+        },
+        {
+          "type": "equation",
+          "label": "Pass@K Unbiased Estimator",
+          "tex": "pass@k = \\mathbb{E} \\left[ 1 - \\frac{\\binom{n-c}{k}}{\\binom{n}{k}} \\right]",
+          "description": "Efficient formula for pass@k based on combinations."
+        },
+        {
+          "type": "text",
+          "content": "For $n - c \\ge k$, this is implemented using a stable product calculation to avoid overflow issues associated with large factorials [8]:"
+        },
+        {
+          "type": "equation",
+          "label": "Pass@K Stable Implementation",
+          "tex": "pass@k = 1 - \\prod_{i=0}^{k-1} \\frac{n - c - i}{n - i}",
+          "description": "Iterative product implementation for programmatic usage."
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-2-2",
+      "heading": "2.2 Advanced Pass@k Optimization (PKPO)",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Recent engineering advances have moved beyond merely measuring Pass@k to directly optimizing it using Reinforcement Learning (RL). [17] Conventional RL algorithms prioritize Pass@1 (maximizing the mean reward), which often leads to \"distribution collapse\" where the model only explores a narrow path. [18] Pass@k Policy Optimization (PKPO) transforms the reward signal to encourage diversity, ensuring that the *set* of $K$ samples has a high probability of success. [17]"
+        },
+        {
+          "type": "text",
+          "content": "The gradient of the Pass@k objective with respect to model parameters $\\theta$ is derived as:"
+        },
+        {
+          "type": "equation",
+          "label": "PKPO Gradient",
+          "tex": "\\nabla_\\theta J_{PKPO} = \\mathbb{E}_{y_1 \\dots y_n} \\left[ \\sum_{i=1}^n w_i(y) \\nabla_\\theta \\log \\pi_\\theta(y_i | x) \\right]",
+          "description": "Gradient calculations for Pass@k Optimization."
+        },
+        {
+          "type": "text",
+          "content": "Where the weight $w_i(y)$ assigned to each sample depends on whether it passed or failed, and its rank within the batch. For $k > 1$, only the best sample in the batch contributes to the gradient, whereas for $k=1$, all samples contribute equally (equivalent to standard policy gradients). [17]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-2-3",
+      "heading": "2.3 Unit Test Harness and Pass@k Implementation",
+      "blocks": [
+        {
+          "type": "code",
+          "language": "python",
+          "code": "import numpy as np\nfrom typing import List\n\ndef calculate_unbiased_pass_at_k(n: int, c: int, k: int) -> float:\n    \"\"\"\n    Computes the unbiased estimator of pass@k as per Chen et al. (2021).\n    Rationale: Handles sampling without replacement from a finite pool.\n    \"\"\"\n    if n - c < k:\n        return 1.0\n    \n    # Vectorized product for numerical stability\n    # Formula: 1 - Product_{i=0}^{k-1} (n - c - i) / (n - i)\n    indices = np.arange(k)\n    prob_all_fail = np.prod((n - c - indices) / (n - indices))\n    return 1.0 - prob_all_fail\n\ndef run_code_eval_harness(model, tokenizer, prompt, num_samples=200, k_vals=[1, 10, 100]):\n    \"\"\"\n    Production-level harness for HumanEval-style evaluation.\n    \"\"\"\n    completions = []\n    \n    # Engineering Note: High temperature (0.8) is used to ensure\n    # diversity for pass@k estimation.\n    for _ in range(num_samples):\n        completion = model.generate(prompt, temperature=0.8, do_sample=True)\n        completions.append(completion)\n        \n    # Verify samples against hidden unit tests\n    # c = count_passed_unit_tests(completions, tests)\n    # results = {k: calculate_unbiased_pass_at_k(num_samples, c, k) for k in k_vals}\n    # return results"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-3",
+      "heading": "3. Data Integrity and Contamination Protocols",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "A critical failure mode in modern LLM development is \"benchmark leakage\" or data contamination. Because pre-training datasets consist of trillions of tokens scraped from the public internet, it is statistically certain that benchmark questions (like MMLU) are present in the training set. [1] This leads to model memorization rather than actual logic, rendering high benchmark scores meaningless for assessing generalization. [20]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-3-1",
+      "heading": "3.1 Scalable Near-Duplicate Detection via MinHash LSH",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "To rigorously prove that benchmark text does not appear in the training data, engineers utilize Locality Sensitive Hashing (LSH), specifically the MinHash algorithm. [22] MinHash provides a probabilistic estimate of the Jaccard similarity between two sets without requiring the quadratic cost of pairwise comparisons. [22]"
+        },
+        {
+          "type": "text",
+          "content": "The technical process follows three primary stages:\n1. **Shingling:** Documents are broken into overlapping $k$-grams.\n2. **MinHashing:** Multiple independent hash functions are applied to the shingles. For each function, the minimum hash value is recorded, forming a \"signature\" vector of length $n$.\n3. **LSH Banding:** The signature vector is divided into $b$ bands, each containing $r$ rows. Two documents are \"candidate pairs\" if they share at least one identical band. [22]"
+        },
+        {
+          "type": "text",
+          "content": "The probability of collision (identifying a potential duplicate) for a given Jaccard similarity $s$ follows an S-curve defined by:"
+        },
+        {
+          "type": "equation",
+          "label": "LSH Collision Probability",
+          "tex": "P(collision) = 1 - (1 - s^r)^b",
+          "description": "Calculates the probability of triggering a duplicate."
+        },
+        {
+          "type": "text",
+          "content": "By adjusting $b$ and $r$, engineers can tune the threshold $t \\approx (1/b)^{1/r}$ at which contamination is flagged. [22]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-3-2",
+      "heading": "3.2 Efficiency and Precision in Deduplication",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Implementing MinHash LSH at the scale of 15 trillion tokens (the size of the Llama-3.1 corpus) introduces significant hardware constraints. Engineers must avoid floating-point precision loss; standard float32 can only represent integers up to 16.7 million, while uint32 or uint64 is required for high-collision hash functions to maintain distinct buckets for billions of unique shingles. [22]"
+        },
+        {
+          "type": "table",
+          "title": "MinHash LSH Configuration",
+          "headers": ["Feature", "Configuration", "Rationale"],
+          "rows": [
+            ["Shingle Size", "5 - 13 words", "Balances sensitivity to phrasing vs. identical copying. [22]"],
+            ["Signature Length ($n$)", "128 - 256", "Higher $n$ reduces the variance of the Jaccard estimate. [23]"],
+            ["Threshold ($t$)", "0.8 - 0.9", "High threshold focuses on exact or near-exact duplicates. [22]"],
+            ["Hashing Logic", "FNV-1a or MurmurHash3", "High-throughput, non-cryptographic hashes for speed. [27]"]
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-3-3",
+      "heading": "3.3 Implementation: Contamination Search Pipeline",
+      "blocks": [
+        {
+          "type": "mermaid",
+          "title": "Data Contamination Search Architecture",
+          "code": "graph TD\n    A[Corpus Texts] --> B[Generate Text N-Grams Shingles]\n    C[Benchmark Questions] --> D[Generate Benchmark Shingles]\n    B --> E[Execute MinHash Signature Generator]\n    D --> F[Execute MinHash Signature Generator]\n    E --> G[LSH Banding Layer]\n    F --> H[LSH Banding Layer]\n    G --> I{Hash Bucket Match?}\n    H --> I\n    I -- Yes --> J[Candidate Pair Identification]\n    I -- No --> K[No Contamination Found]\n    J --> L[Exact Jaccard Verification]\n    L -- score > 0.85 --> M[Flag as Contaminated]\n    L -- score < 0.85 --> N[False Positive]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-4",
+      "heading": "4. Evaluative Alignment: LLM-as-a-Judge",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Multiple-choice benchmarks cannot evaluate conversational fluidity, helpfulness, or the absence of subtle hallucinations. [1] To assess these qualitative dimensions at scale, engineers utilize the \"LLM-as-a-Judge\" paradigm, where a high-capability model (e.g., GPT-4o or Claude 3.5 Sonnet) acts as an evaluator for a newly trained model's output. [28]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-4-1",
+      "heading": "4.1 Framework Taxonomy and Prompt Anatomy",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Specialized judge models, such as Prometheus-2 or M-Prometheus, are fine-tuned specifically to emulate human evaluation rubrics. [30] A production-ready judge prompt must decompose the task into four critical components [31]:"
+        },
+        {
+          "type": "list",
+          "style": "bullet",
+          "items": [
+            "**Role/System Statement:** Defining the judge's expertise and impartial tone.",
+            "**Evaluation Criteria (Rubric):** Explicitly defining scores from 1 to 5 for helpfulness, tone, and accuracy.",
+            "**Context and Reference:** Providing a \"gold standard\" answer to anchor the judge's scoring. [28]",
+            "**Chain of Thought (CoT):** Forcing the judge to write its reasoning *before* assigning a final numerical score to reduce stochasticity. [34]"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-4-2",
+      "heading": "4.2 Mathematical Modeling of Pairwise Preferences",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Pairwise comparison is generally more stable than single-point scoring. [28] If a judge chooses model $m_i$ over model $m_j$, this outcome is modeled using the Bradley-Terry-Luce (BTL) framework. [36] For a collection of models $M$, the probability that response $i$ is preferred over $j$ for prompt $x$ is:"
+        },
+        {
+          "type": "equation",
+          "label": "BTL Pairwise Probability",
+          "tex": "P(m_i > m_j | x) = \\frac{\\exp(\\lambda_i)}{\\exp(\\lambda_i) + \\exp(\\lambda_j)}",
+          "description": "Bradley-Terry-Luce model for preference probabilities."
+        },
+        {
+          "type": "text",
+          "content": "Where $\\lambda$ is the latent quality score assigned to the response. In production leaderboards, these scores are estimated via Maximum Likelihood Estimation (MLE) across millions of pairwise comparisons. [38]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-4-3",
+      "heading": "4.3 Implementation: JSON-Structured Judge Prompt",
+      "blocks": [
+        {
+          "type": "code",
+          "language": "python",
+          "code": "JUDGE_PROMPT_TEMPLATE = \"\"\"\nYou are a senior technical judge evaluating the correctness of Python code.\n\n[Instruction]\nQuestion: {user_prompt}\nModel Response: {model_output}\nReference Answer: {reference_solution}\n\n1: Code contains syntax errors or logic fails.\n2: Code is mostly correct but inefficient or lacks edge case handling.\n3: Code is correct and efficient.\n\n[Constraint]\nProvide your reasoning in the 'feedback' field and the integer score in the 'score' field.\nOutput MUST be in valid JSON.\n\"\"\"\n\ndef llm_judge_call(judge_model, prompt_data):\n    \"\"\"\n    Executes a structured judge call.\n    Rationale: JSON ensures machine-readability of qualitative evaluations.\n    \"\"\"\n    formatted_prompt = JUDGE_PROMPT_TEMPLATE.format(**prompt_data)\n    \n    response = judge_model.generate(formatted_prompt, response_format={\"type\": \"json_object\"})\n    # Result: {\"feedback\": \"The model correctly implemented the logic...\", \"score\": 3}\n    return response"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-5",
+      "heading": "5. Competitive Dynamics: LMSYS Chatbot Arena and Elo Systems",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The LMSYS Chatbot Arena represents the ultimate \"undisputed\" leaderboard for LLMs, utilizing crowdsourced blind A/B testing. [1] Because the prompts are generated live by humans, it is fundamentally immune to the data contamination that plagues static benchmarks. [1]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-5-1",
+      "heading": "5.1 The Mathematical Equivalence of Elo and Bradley-Terry",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "While the Arena uses an Elo-based ranking system, it is mathematically grounded in the Bradley-Terry model. [38] The fundamental assumption is that each model's \"skill\" is a normally distributed random variable. The Elo rating $R$ update for a match between model A and B (where $S_A$ is the score, 1 for win, 0 for loss) is governed by:"
+        },
+        {
+          "type": "equation",
+          "label": "Elo Rating Update",
+          "tex": "R'_A = R_A + K \\cdot (S_A - E_A)",
+          "description": "The logic behind Chatbot Arena's continuous Elo ladder."
+        },
+        {
+          "type": "text",
+          "content": "Where $E_A$ is the expected win probability and $K$ is the sensitivity factor. In modern implementations, batches of votes are used to fit the Bradley-Terry scores via logistic regression, which provides better statistical inference for model strength than sequential Elo updates. [37]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-5-2",
+      "heading": "5.2 Rigging Strategies and Defense Mechanisms",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Lead engineering teams must defend leaderboards against \"omnipresent rigging,\" where attackers generate thousands of synthetic votes to artificially boost a target model's ranking. [40] Defense mechanisms include:"
+        },
+        {
+          "type": "list",
+          "style": "bullet",
+          "items": [
+            "**IP-Based Rate Limiting:** Preventing bot-driven voting bursts.",
+            "**De-Anonymization Filtering:** Detecting when users can identify a model by its specific stylistic \"fingerprint\" and filtering those votes. [41]",
+            "**Judge Reliability Weighting:** Weighting votes from users (or judge models) based on their historical agreement with expert human labels. [36]"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-6",
+      "heading": "6. Hardware Implications and Efficiency Analysis",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Evaluating LLMs at scale imposes severe hardware constraints. The transition from memory-bound to compute-bound regimes depends heavily on the batch size and context length of the evaluation suite. [42]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-6-1",
+      "heading": "6.1 VRAM Footprint and Memory Bandwidth",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "During evaluation, the GPU's VRAM is consumed by three primary components: model weights, activation buffers, and the Key-Value (KV) cache. [44]"
+        },
+        {
+          "type": "table",
+          "title": "Hardware Limitations",
+          "headers": ["Hardware Component", "Impact on Evaluation", "Engineering Solution"],
+          "rows": [
+            ["VRAM Capacity", "Limits the maximum model size and context length.", "Aggressive 4-bit/8-bit quantization. [44]"],
+            ["Memory Bandwidth", "Dominates the latency of single-token decoding.", "Utilizing H100/H200 with HBM3e (up to 4.8 TB/s). [45]"],
+            ["NVLink Interconnect", "Critical for tensor-parallel evaluation across GPUs.", "High-speed chip-to-chip communication (1.8 TB/s). [43]"]
+          ]
+        },
+        {
+          "type": "text",
+          "content": "For a 70B parameter model, loading weights in FP16 requires 140 GB of VRAM. Adding a 4,096-token KV cache for a batch of 16 requests adds another 40 GB of demand, necessitating a multi-GPU setup (e.g., 4x A100 80GB) just for inference. [45]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-6-2",
+      "heading": "6.2 PagedAttention: Virtual Memory for LLMs",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "To eliminate memory waste in concurrent evaluation, systems like vLLM implement PagedAttention. [2] In traditional systems, KV cache was allocated as large, contiguous slabs based on the *maximum* possible sequence length, wasting up to 60-80% of memory due to over-allocation. [49] PagedAttention partitions the cache into fixed-size blocks (pages), mapped via a logical-to-physical block table. [2]"
+        },
+        {
+          "type": "mermaid",
+          "title": "vLLM PagedAttention Mechanism",
+          "code": "graph LR\n    subgraph Logical Blocks\n        LB0\n        LB1\n        LB2\n    end\n    \n    subgraph Block Table Mapping\n        BT0\n        BT1\n        BT2\n    end\n    \n    subgraph Physical Memory Pool\n        PB3\n        PB7\n        PB21\n        PBF\n    end\n    \n    LB0 --> BT0 --> PB7\n    LB1 --> BT1 --> PB21\n    LB2 --> BT2 --> PB3"
+        },
+        {
+          "type": "text",
+          "content": "This architecture allows for **Continuous Batching**, where finished sequences are immediately evicted and new requests are pulled in, increasing evaluation throughput by 2x to 24x compared to static batching frameworks. [2]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s7-6-3",
+      "heading": "6.3 Throughput vs. Latency Tradeoffs",
+      "blocks": [
+        {
+          "type": "table",
+          "title": "Inference Engines Comparison",
+          "headers": ["Serving Engine", "Primary Advantage", "Typical Performance (Llama-7B)"],
+          "rows": [
+            ["vLLM", "High concurrency and memory efficiency via PagedAttention.", "1000 - 5000 tokens/sec on A100. [2]"],
+            ["TGI", "Mature Hugging Face ecosystem and lower tail latencies.", "1000 - 3000 tokens/sec on A100. [52]"],
+            ["TensorRT-LLM", "Deepest optimization for NVIDIA hardware (kernel fusion).", "2x-4x throughput improvement over PyTorch. [54]"]
+          ]
+        }
+      ]
+    },
+    {
+      "type": "keyTakeaway",
+      "points": [
+        "**Multi-choice Benchmarking (MMLU):** When tracking strict evaluation, DO NOT use string extraction from tokens; inject tokens directly into the `log_softmax` probability array to pick standard options (A, B, C, D) programmatically. [5]",
+        "**Pass@K and Execution Evaluation:** Overlapping text matches BLEU scores terribly for logic tasks. Code datasets like HumanEval must evaluate via verifiable execution environments utilizing combinatorial formula derivations to ensure stability. [10]",
+        "**MinHash Data Contamination Guard:** Because models memorize the entire internet during Pre-Training, evaluations MUST filter for benchmark leakage. Utilizing LSH (Locality Sensitive Hashing) enables rapid deduplication verification over 15+ Trillion tokens. [22]",
+        "**Paged Attention Inference Scale:** Classical KV caching allocates massively disjointed empty physical blocks for context length. Mapping logical tokens via index tables directly handles contiguous memory defragmentation, supercharging evaluation frameworks by 24X! [49]"
+      ]
+    },
+    {
+      "type": "references",
+      "items": [
+        {
+          "num": 1,
+          "text": "chatper 7 evaluation and benchmarking.pdf",
+          "url": ""
+        },
+        {
+          "num": 2,
+          "text": "vLLM vs Triton vs TGI: Choosing the Right LLM Serving Framework - Clarifai",
+          "url": "https://www.clarifai.com/blog/model-serving-framework/"
+        },
+        {
+          "num": 3,
+          "text": "Don't Pass@k: A Bayesian Framework for Large Language Model Evaluation - arXiv",
+          "url": "https://arxiv.org/html/2510.04265v1"
+        },
+        {
+          "num": 4,
+          "text": "What is MMLU benchmark ? | Deepchecks",
+          "url": "https://deepchecks.com/glossary/mmlu-benchmark/"
+        },
+        {
+          "num": 5,
+          "text": "llama-models/models/llama3_1/eval_details.md at main - GitHub",
+          "url": "https://github.com/meta-llama/llama-models/blob/main/models/llama3_1/eval_details.md"
+        },
+        {
+          "num": 6,
+          "text": "MMLU Benchmarking | Sebastian Raschka, PhD",
+          "url": "https://sebastianraschka.com/reasoning-from-scratch/chF/02_mmlu/"
+        },
+        {
+          "num": 7,
+          "text": "Multiple Choice Normalization in LM Evaluation - EleutherAI Blog",
+          "url": "https://blog.eleuther.ai/multiple-choice-normalization/"
+        },
+        {
+          "num": 8,
+          "text": "Statistics for AI/ML, Part 4: pass@k and Unbiased Estimator - Han Lee",
+          "url": "https://leehanchung.github.io/blogs/2025/09/08/pass-at-k/"
+        },
+        {
+          "num": 9,
+          "text": "Pass@k Performance in Code and LLM Systems - Emergent Mind",
+          "url": "https://www.emergentmind.com/topics/pass-k-performance"
+        },
+        {
+          "num": 10,
+          "text": "HumanEval | DeepEval by Confident AI - The LLM Evaluation Framework",
+          "url": "https://deepeval.com/docs/benchmarks-human-eval"
+        },
+        {
+          "num": 11,
+          "text": "HumanEval: A Benchmark for Evaluating LLM Code Generation Capabilities | DataCamp",
+          "url": "https://www.datacamp.com/tutorial/humaneval-benchmark-for-evaluating-llm-code-generation-capabilities"
+        },
+        {
+          "num": 12,
+          "text": "HumanEval: Code generation benchmarks - Statsig",
+          "url": "https://www.statsig.com/perspectives/humaneval-code-benchmarks"
+        },
+        {
+          "num": 13,
+          "text": "Pass@k: A Practical Metric for Evaluating AI-Generated Code | by Ipshita - Medium",
+          "url": "https://medium.com/@ipshita/pass-k-a-practical-metric-for-evaluating-ai-generated-code-18462308afbd"
+        },
+        {
+          "num": 14,
+          "text": "Efficient Prediction of pass@k Scaling in Large Language Models - arXiv.org",
+          "url": "https://arxiv.org/html/2510.05197v1"
+        },
+        {
+          "num": 15,
+          "text": "Pass@K Policy Optimization: Solving Harder Reinforcement Learning Problems - arXiv",
+          "url": "https://arxiv.org/html/2505.15201v4"
+        },
+        {
+          "num": 16,
+          "text": "HumanEval: LLM Benchmark for Code Generation - Deepgram",
+          "url": "https://deepgram.com/learn/humaneval-llm-benchmark"
+        },
+        {
+          "num": 17,
+          "text": "Pass@K Policy Optimization: Solving Harder Reinforcement Learning Problems - NeurIPS",
+          "url": "https://neurips.cc/virtual/2025/poster/117623"
+        },
+        {
+          "num": 18,
+          "text": "SimKO: Simple Pass@K Policy Optimization - arXiv",
+          "url": "https://arxiv.org/html/2510.14807v1"
+        },
+        {
+          "num": 19,
+          "text": "Pass@K Policy Optimization: Solving Harder Reinforcement Learning Problems - OpenReview",
+          "url": "https://openreview.net/pdf?id=W6WC6047X2"
+        },
+        {
+          "num": 20,
+          "text": "MMLU-CF: A Contamination-free Multi-task Language Understanding Benchmark - ACL Anthology",
+          "url": "https://aclanthology.org/2025.acl-long.656.pdf"
+        },
+        {
+          "num": 21,
+          "text": "When Benchmarks Leak: Inference-Time Decontamination for LLMs - arXiv",
+          "url": "https://arxiv.org/html/2601.19334v1"
+        },
+        {
+          "num": 22,
+          "text": "Data Deduplication at Trillion Scale: How to Solve the Biggest ... - Zilliz",
+          "url": "https://zilliz.com/blog/data-deduplication-at-trillion-scale-solve-the-biggest-bottleneck-of-llm-training"
+        },
+        {
+          "num": 23,
+          "text": "MinHash LSH in Milvus: The Secret Weapon for Fighting Duplicates ...",
+          "url": "https://milvus.io/blog/minhash-lsh-in-milvus-the-secret-weapon-for-fighting-duplicates-in-llm-training-data.md"
+        },
+        {
+          "num": 24,
+          "text": "5 Locality Sensitive Hashing",
+          "url": "https://users.cs.utah.edu/~jeffp/teaching/cs5140-S17/cs5140/L5-LSH.pdf"
+        },
+        {
+          "num": 25,
+          "text": "Improve MinhashLSH for Deduplication on Large Scale Dataset",
+          "url": "https://tech.preferred.jp/en/blog/improve-minhashlsh-for-deduplication-on-large-scale-dataset/"
+        },
+        {
+          "num": 26,
+          "text": "MinHash Tutorial with Python Code - Chris McCormick",
+          "url": "https://mccormickml.com/2015/06/12/minhash-tutorial-with-python-code/"
+        },
+        {
+          "num": 27,
+          "text": "lizdotsh/minlizhash: simple from scratch implementation of the MinHash LSH algorithm - GitHub",
+          "url": "https://github.com/lizdotsh/minlizhash"
+        },
+        {
+          "num": 28,
+          "text": "LLM-as-a-Judge Simply Explained: The Complete Guide to Run LLM Evals at Scale",
+          "url": "https://www.confident-ai.com/blog/why-llm-as-a-judge-is-the-best-llm-evaluation-method"
+        },
+        {
+          "num": 29,
+          "text": "LLM-Based Judge Model - Emergent Mind",
+          "url": "https://www.emergentmind.com/topics/llm-based-judge-model"
+        },
+        {
+          "num": 30,
+          "text": "\u201cAll Rise for the Honorable LLM\u201d: A Deep Dive into the LLM-as-a-Judge Paradigm - Medium",
+          "url": "https://medium.com/swlh/all-rise-for-the-honorable-llm-a-deep-dive-into-the-llm-as-a-judge-paradigm-b763270e1600"
+        },
+        {
+          "num": 31,
+          "text": "LLM-as-a-Judge Prompt Engineering Guide - Galileo",
+          "url": "https://v2docs.galileo.ai/concepts/metrics/custom-metrics/prompt-engineering"
+        },
+        {
+          "num": 32,
+          "text": "prometheus-eval/libs/prometheus-eval/prometheus_eval/prompts.py at main - GitHub",
+          "url": "https://github.com/prometheus-eval/prometheus-eval/blob/main/libs/prometheus-eval/prometheus_eval/prompts.py"
+        },
+        {
+          "num": 33,
+          "text": "The Definitive LLM-as-a-Judge Guide for Scalable LLM Evaluation | by Jeffrey Ip | Medium",
+          "url": "https://medium.com/@jeffreyip54/the-definitive-llm-as-a-judge-guide-for-scalable-llm-evaluation-a4aad7b455b9"
+        },
+        {
+          "num": 34,
+          "text": "Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena | OpenReview",
+          "url": "https://openreview.net/forum?id=uccHPGDlao"
+        },
+        {
+          "num": 35,
+          "text": "Using LLM-as-a-judge \u200d\u2696\ufe0f for an automated and versatile evaluation - Hugging Face Open-Source AI Cookbook",
+          "url": "https://huggingface.co/learn/cookbook/llm_judge"
+        },
+        {
+          "num": 36,
+          "text": "A Judge-Aware Ranking Framework for Evaluating Large Language Models without Ground Truth - arXiv",
+          "url": "https://arxiv.org/html/2601.21817v1"
+        },
+        {
+          "num": 37,
+          "text": "IS ELO RATING RELIABLE?ASTUDY UNDER MODEL MISSPECIFICATION - OpenReview",
+          "url": "https://openreview.net/pdf?id=uUq0gemhnv"
+        },
+        {
+          "num": 38,
+          "text": "Statistical Extensions of the Bradley-Terry and Elo Models - Arena AI",
+          "url": "https://arena.ai/blog/extended-arena/"
+        },
+        {
+          "num": 39,
+          "text": "Bradley\u2013Terry model - Wikipedia",
+          "url": "https://en.wikipedia.org/wiki/Bradley%E2%80%93Terry_model"
+        },
+        {
+          "num": 40,
+          "text": "ICML Poster Improving Your Model Ranking on Chatbot Arena by Vote Rigging",
+          "url": "https://icml.cc/virtual/2025/poster/46419"
+        },
+        {
+          "num": 41,
+          "text": "Improving Your Model Ranking on Chatbot Arena by Vote Rigging - arXiv.org",
+          "url": "https://arxiv.org/html/2501.17858v1"
+        },
+        {
+          "num": 42,
+          "text": "Dedicated vs Shared GPU Memory: VRAM Bandwidth, Paging, and LLM Performance",
+          "url": "https://www.hyperbolic.ai/blog/dedicated-vs-shared-gpu-memory"
+        },
+        {
+          "num": 43,
+          "text": "What is the impact of memory bandwidth on the performance of large-scale language models using Tensor Cores? - Massed Compute",
+          "url": "https://massedcompute.com/faq-answers/?question=What%20is%20the%20impact%20of%20memory%20bandwidth%20on%20the%20performance%20of%20large-scale%20language%20models%20using%20Tensor%20Cores?"
+        },
+        {
+          "num": 44,
+          "text": "VRAM vs System RAM: What Actually Limits Running LLMs Locally? - Dewan Ahmed",
+          "url": "https://www.dewanahmed.com/vrams-rams/"
+        },
+        {
+          "num": 45,
+          "text": "What is GPU Memory and Why it Matters for LLM Inference - Bento",
+          "url": "https://www.bentoml.com/blog/what-is-gpu-memory-and-why-it-matters-for-llm-inference"
+        },
+        {
+          "num": 46,
+          "text": "Introduction to vLLM and PagedAttention | Runpod Blog",
+          "url": "https://www.runpod.io/blog/introduction-to-vllm-and-pagedattention"
+        },
+        {
+          "num": 47,
+          "text": "SemiAnalysis InferenceMAX: vLLM and NVIDIA Accelerate ...",
+          "url": "https://blog.vllm.ai/2025/10/09/blackwell-inferencemax.html"
+        },
+        {
+          "num": 48,
+          "text": "PagedAttention: Efficient Memory Management for LLMs - Emergent Mind",
+          "url": "https://www.emergentmind.com/topics/pagedattention"
+        },
+        {
+          "num": 49,
+          "text": "The Architecture Behind vLLM: How PagedAttention Improves Memory Utilization - Medium",
+          "url": "https://medium.com/@mandeep0405/the-architecture-behind-vllm-how-pagedattention-improves-memory-utilization-2f9b25272110"
+        },
+        {
+          "num": 50,
+          "text": "Part 2 \u2014 Memory Is the Real Bottleneck: How Paged Attention Powers the vLLM Inference Engine | Data Science Dojo",
+          "url": "https://datasciencedojo.com/blog/understanding-paged-attention/"
+        },
+        {
+          "num": 51,
+          "text": "How PagedAttention resolves memory waste of LLM systems - Red Hat Developer",
+          "url": "https://developers.redhat.com/articles/2025/07/24/how-pagedattention-resolves-memory-waste-llm-systems"
+        },
+        {
+          "num": 52,
+          "text": "Comparative Analysis of Large Language Model Inference Serving Systems: A Performance Study of vLLM and HuggingFace TGI - arXiv.org",
+          "url": "https://arxiv.org/html/2511.17593v1"
+        },
+        {
+          "num": 53,
+          "text": "Practical strategies for vLLM performance tuning | Red Hat Developer",
+          "url": "https://developers.redhat.com/articles/2026/03/03/practical-strategies-vllm-performance-tuning"
+        },
+        {
+          "num": 54,
+          "text": "vLLM vs TGI vs TensorRT\u2011LLM vs Ollama - Compute with Hivenet",
+          "url": "https://compute.hivenet.com/post/vllm-vs-tgi-vs-tensorrt-llm-vs-ollama"
+        },
+        {
+          "num": 55,
+          "text": "TensorRT-LLM vs TGI vs vLLM: Model Serving for AI Infrastructure 2026 - Index.dev",
+          "url": "https://www.index.dev/skill-vs-skill/ai-vllm-vs-tgi-vs-tensorrt-llm"
+        },
+        {
+          "num": 56,
+          "text": "HumanEval Coding Benchmark Review - Emergent Mind",
+          "url": "https://www.emergentmind.com/topics/humaneval-coding-benchmark"
+        }
+      ]
+    }
+  ]
+}

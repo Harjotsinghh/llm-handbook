@@ -1,0 +1,687 @@
+{
+    "id": "ch4",
+    "title": "4. Supervised Fine-Tuning",
+    "subtitle": "Chat Templates, Label Masking, LoRA/QLoRA & Sequence Packing",
+    "icon": "",
+    "color": "#ec4899",
+    "sections": [
+        {
+            "type": "intro",
+            "heading": "Technical Engineering Deep-Dive: Supervised Fine-Tuning (SFT)",
+            "body": "The lifecycle of a Large Language Model (LLM) is bifurcated into two primary stages: **pretraining** and **alignment**. While pretraining equips the model with a dense, probabilistic map of human knowledge, the resulting artifact is fundamentally a document-completer rather than a task-oriented agent. [1]\n\nTo transform this high-entropy knowledge base into a helpful, conversational AI, engineers must perform **Supervised Fine-Tuning (SFT)**. This is the process of specializing a base model on a curated dataset of high-quality instruction-response pairs, specialized architecture standardizations, and rigorous mathematical filtering. [1]"
+        },
+        {
+            "type": "section",
+            "id": "s4-1",
+            "heading": "4.1 Structural Alignment: The Engineering of Conversational Syntax",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "The foundational goal of SFT is to teach the model the interaction format between a human user and an AI assistant. [1] This requires a transition from training on raw, unstructured text to training on strictly formatted conversational turns."
+                },
+                {
+                    "type": "text",
+                    "content": "**4.1.1 Implementation Standards for Prompt Templates**"
+                },
+                {
+                    "type": "text",
+                    "content": "Engineers use specialized **control tokens** to demarcate the boundaries of different participants. These tokens are \"invisible\" to the end-user but are critical for the model to understand role transitions (system/user/assistant). [1]"
+                },
+                {
+                    "type": "table",
+                    "title": "Prompt Template Token Standards",
+                    "headers": [
+                        "Model / Format",
+                        "System Start",
+                        "User Start",
+                        "Assistant Start",
+                        "End of Turn (EOT)"
+                    ],
+                    "rows": [
+                        [
+                            "ChatML",
+                            "`<|im_start|>system`",
+                            "`<|im_start|>user`",
+                            "`<|im_start|>assistant`",
+                            "`<|im_end|>`"
+                        ],
+                        [
+                            "Llama 3.1",
+                            "`<|begin_of_text|><|start_header_id|>system<|end_header_id|>`",
+                            "`<|start_header_id|>user<|end_header_id|>`",
+                            "`<|start_header_id|>assistant<|end_header_id|>`",
+                            "`<|eot_id|>`"
+                        ],
+                        [
+                            "DeepSeek-V3",
+                            "`[unused0]` (System)",
+                            "`[unused1]` (User)",
+                            "`[unused2]` (Assistant)",
+                            "`[unused3]`"
+                        ]
+                    ]
+                },
+                {
+                    "type": "callout",
+                    "style": "warning",
+                    "title": "Role Confusion",
+                    "content": "Without consistent templates, models may accidentally generate the user's part of the dialogue instead of provides an answer. Control tokens prevent this by acting as architectural barriers. [1]"
+                },
+                {
+                    "type": "text",
+                    "content": "**4.1.2 Data Pipeline for Conversational Collating**"
+                },
+                {
+                    "type": "text",
+                    "content": "A production-grade pipeline must handle **multi-turn interactions**. The entire history is concatenated into a single sequence to maintain long-term context. [1]"
+                },
+                {
+                    "type": "mermaid",
+                    "title": "Conversational Data Pipeline",
+                    "code": "graph TD\n  A[\"Raw Conversation Text\"] --> B[\"Tokenize with Chat Templates\"]\n  B --> C[\"Concatenate Turns & Pad to Length\"]\n  C --> D[\"Create Label Tensor\"]\n  D --> E[\"Apply Mask: set user/system labels = -100\"]\n  E --> F[\"Padded Batching\"]\n  F --> G[\"GPU Forward Pass + Masked Loss Computation\"]"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s4-2",
+            "heading": "4.2 Mathematical Foundations: Label Masking and Gradient Flow",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "The most critical engineering concept in SFT is that the model must only learn how to **answer** questions, not how to **ask** them. [1] Uniform training would bias the model toward predicting the user's prompt as much as the assistant's response."
+                },
+                {
+                    "type": "text",
+                    "content": "**4.2.1 Derivation of Masked Cross-Entropy Loss**"
+                },
+                {
+                    "type": "text",
+                    "content": "Engineers use **Label Masking** to zero out the loss contribution of any token that doesn't belong to the assistant's turn. [8]"
+                },
+                {
+                    "type": "equation",
+                    "label": "Masked Cross-Entropy Loss",
+                    "tex": "\\mathcal{L} = -\\frac{1}{\\sum M_t} \\sum_{t=1}^{T} M_t \\cdot \\mathbf{y}_t^\\top \\log(\\hat{\\mathbf{y}}_t)",
+                    "description": "Where $M_t = 0$ if the token belongs to User/System, and $M_t = 1$ if it belongs to Assistant. [5]"
+                },
+                {
+                    "type": "text",
+                    "content": "**4.2.2 Gradient Zeroing for Prompt Tokens**"
+                },
+                {
+                    "type": "text",
+                    "content": "In PyTorch, the `nn.CrossEntropyLoss` parameter `ignore_index` is typically set to **-100**. [1] Any target label with this value is excluded from both the loss calculation and the backward pass."
+                },
+                {
+                    "type": "equation",
+                    "label": "Gradient Zeroing Rationale",
+                    "tex": "\\frac{\\partial \\mathcal{L}}{\\partial z_i} = M_t \\cdot (\\hat{y}_i - y_i)",
+                    "description": "When $M_t = 0$, the gradient becomes zero, ensuring the weights remain unchanged by the user's language patterns. [1]"
+                },
+                {
+                    "type": "code",
+                    "language": "python",
+                    "filename": "sft_loss.py",
+                    "code": "import torch\nimport torch.nn as nn\n\ndef compute_sft_loss(logits, targets, mask_value=-100):\n    # Standard CrossEntropyLoss with ignore_index\n    loss_fct = nn.CrossEntropyLoss(ignore_index=mask_value)\n    \n    # Shift for autoregressive prediction\n    shift_logits = logits[..., :-1, :].contiguous()\n    shift_labels = targets[..., 1:].contiguous()\n    \n    return loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s4-3",
+            "heading": "4.3 Catastrophic Forgetting and Mixture Engineering",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "**Catastrophic Forgetting** is the phenomenon where a model aggressively fine-tuned on a specific task loses its general-purpose capabilities. [1] This happens because SFT alters the fragile, high-dimensional knowledge established during pretraining."
+                },
+                {
+                    "type": "text",
+                    "content": "**4.3.1 Mitigation via Learning Rate Control**"
+                },
+                {
+                    "type": "comparison",
+                    "items": [
+                        {
+                            "title": "Pretraining Phase",
+                            "description": "Massive data, high learning rate for feature discovery.",
+                            "pros": [
+                                "Builds general knowledge"
+                            ],
+                            "cons": [
+                                "10^-4 to 10^-5 LR"
+                            ]
+                        },
+                        {
+                            "title": "SFT Phase",
+                            "description": "Fine-grained adjustment, very low learning rate. Constant LR often preferred; some findings suggest SFT works well with no warmup.",
+                            "pros": [
+                                "Preserves pretraining knowledge"
+                            ],
+                            "cons": [
+                                "10^-6 to 5x10^-6 LR"
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "type": "text",
+                    "content": "**4.3.2 The LIMA Principle and Rehearsal Data Mixing**"
+                },
+                {
+                    "type": "text",
+                    "content": "The **LIMA (Less Is More for Alignment)** principle states that quality trumps quantity. [10] To prevent forgetting, engineers employ \"Data Mixing\"."
+                },
+                {
+                    "type": "list",
+                    "style": "metric",
+                    "items": [
+                        {
+                            "label": "Domain Data Ratio",
+                            "detail": "80-85% (The \"LIMA-like\" core: e.g., 1,000 highly curated examples can align a 65B model) [10]"
+                        },
+                        {
+                            "label": "Rehearsal Data Ratio",
+                            "detail": "15-20% (General instructions like Alpaca/Vicuna/Dolly or FLAN/Orca) [1]"
+                        }
+                    ]
+                },
+                {
+                    "type": "callout",
+                    "style": "insight",
+                    "title": "Llama 3 Finding",
+                    "content": "An 83/17 split using reconstructed general data can actually improve MMLU scores compared to the base model, while mastering the target domain. [11]"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s4-4",
+            "heading": "4.4 Parameter-Efficient Fine-Tuning: LoRA and QLoRA",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "Full fine-tuning (FFT) for a 70B model can consume 600+ GB of VRAM. [13] **LoRA (Low-Rank Adaptation)** democratizes this by updating only a small subset of parameters. [14]"
+                },
+                {
+                    "type": "text",
+                    "content": "**4.4.1 LoRA Mathematical Rationale**"
+                },
+                {
+                    "type": "text",
+                    "content": "LoRA freezes the original weight matrix $W_0$ and trains two smaller matrices $A$ and $B$. [15]"
+                },
+                {
+                    "type": "mermaid",
+                    "title": "LoRA Architecture",
+                    "code": "graph LR\n  W[\"W (base weight, frozen)\"] --> Adapter\n  A[\"LoRA A (trainable)\"] --> Adapter\n  B[\"LoRA B (trainable)\"] --> Adapter\n  Adapter[\"Adapted weight: W + B·A\"] -->|Used in model| Output"
+                },
+                {
+                    "type": "equation",
+                    "label": "LoRA Weight Update",
+                    "tex": "W = W_0 + \\frac{\\alpha}{r} (B \\cdot A)",
+                    "description": "Where matrices A and B have rank $r$, reducing trainable parameters by over 99%. [14]"
+                },
+                {
+                    "type": "callout",
+                    "style": "insight",
+                    "title": "Extreme Efficiency",
+                    "content": "Applying LoRA to GPT-3 (175B) reduced trainable parameters by 10,000x and GPU memory by 3x compared to full fine-tuning. A 65B model can be fine-tuned on a single 48GB GPU using QLoRA. [1]"
+                },
+                {
+                    "type": "text",
+                    "content": "**4.4.2 Hardware Implications: QLoRA (Quantized LoRA)**"
+                },
+                {
+                    "type": "text",
+                    "content": "QLoRA further reduces VRAM by quantizing frozen weights to **4-bit NormalFloat (NF4)**. [16]"
+                },
+                {
+                    "type": "steps",
+                    "title": "QLoRA 3-Step Training Recipe",
+                    "items": [
+                        "**Quantize base model:** Compress to 4-bit (NF4) specially designed for normally-distributed weights.",
+                        "**Keep adapters precision:** The $A,B$ matrices remain in bfloat16 to learn fine details.",
+                        "**Paging & Double Quantization:** Page optimizer states to CPU to avoid OOM memory crashes. [1]"
+                    ]
+                },
+                {
+                    "type": "table",
+                    "title": "7B Model VRAM Requirements",
+                    "headers": [
+                        "Metric",
+                        "Full Fine-Tuning",
+                        "LoRA",
+                        "QLoRA"
+                    ],
+                    "rows": [
+                        [
+                            "Weight Memory",
+                            "14 GB (FP16)",
+                            "14 GB (FP16)",
+                            "3.5 GB (NF4)"
+                        ],
+                        [
+                            "Optimizer States",
+                            "56 GB (AdamW)",
+                            "0.5 GB",
+                            "0.5 GB"
+                        ],
+                        [
+                            "Total VRAM (est.)",
+                            "84+ GB",
+                            "16-20 GB",
+                            "8-10 GB [16]"
+                        ]
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s4-5",
+            "heading": "4.5 Sequence Packing and Block-Diagonal Attention",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "GPU utilization is often limited by memory bandwidth. Standard padding wastes compute on null tokens. **Multipacking** concatenates multiple conversations into a single block. [1]"
+                },
+                {
+                    "type": "mermaid",
+                    "title": "Multipacking vs Padding",
+                    "code": "graph LR\n  subgraph Padding[\"Standard Padding\"]\n    A1[Conv 1] --> P1[Pad]\n    A2[Conv 2] --> P2[Pad]\n  end\n  subgraph Packing[\"Multipacking\"]\n    B1[Conv 1] --> B2[Conv 2]\n    B2 --> B3[Conv 3]\n    B3 --> P3[Minimal Pad]\n  end"
+                },
+                {
+                    "type": "text",
+                    "content": "**4.5.1 Block-Diagonal Attention Masking (PAM)**"
+                },
+                {
+                    "type": "text",
+                    "content": "To prevent Conversation B from seeing Conversation A's context within the same pack, engineers use physical barriers in the attention matrix. [1] SOTA implementations use **FlashAttention-2** varlen functions (varlen_attn) to avoid materializing massive sparse masks. [24]"
+                },
+                {
+                    "type": "code",
+                    "language": "python",
+                    "filename": "packed_attn.py",
+                    "code": "from flash_attn import flash_attn_varlen_func\n\ndef packed_attention_forward(q, k, v, lengths):\n    # lengths: list of sequences in pack, e.g. [500, 100, 1500]\n    cu_seqlens = torch.tensor([0] + torch.cumsum(torch.tensor(lengths), dim=0).tolist(), \n                             dtype=torch.int32).cuda()\n    return flash_attn_varlen_func(\n        q, k, v, cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,\n        max_seqlen_q=max(lengths), max_seqlen_k=max(lengths), causal=True\n    )"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s4-6",
+            "heading": "4.6 SOTA Innovation: Cut Cross-Entropy (CCE)",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "As vocabularies scale (128k+ tokens), the final logit matrix consumes gigabytes. A single sequence can require **5-10 GB** just for the loss computation. [28]"
+                },
+                {
+                    "type": "definition",
+                    "term": "Cut Cross-Entropy (CCE)",
+                    "definition": "An Apple-pioneered technique that computes loss without ever materializing the full logit matrix in global memory. [27]"
+                },
+                {
+                    "type": "list",
+                    "style": "metric",
+                    "items": [
+                        {
+                            "label": "Gemma 2 (2B) Logit Memory",
+                            "detail": "Standard: 24 GB vs CCE: 1 MB [27]"
+                        },
+                        {
+                            "label": "Throughput Gain",
+                            "detail": "Up to 3.5x over standard implementations [28]"
+                        }
+                    ]
+                },
+                {
+                    "type": "text",
+                    "content": "CCE fuses matrix multiplication with softmax reduction in a custom **Triton kernel**, eliminating 75% of memory traffic. [28]"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s4-7",
+            "heading": "4.7 Geometric Operations: Rotary Positional Embeddings (RoPE)",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "Modern SFT involves context lengths far beyond pretraining (e.g., Llama 3.1 128k). [4] Engineers rely on **RoPE**, a multiplicative operation that applies rotation in the complex plane. [32]"
+                },
+                {
+                    "type": "equation",
+                    "label": "RoPE Relative Property",
+                    "tex": "\\mathbf{q}_m^\\top \\mathbf{k}_n = (R_m \\mathbf{x}_m)^\\top (R_n \\mathbf{x}_n) = \\mathbf{x}_m^\\top R_{n-m} \\mathbf{x}_n",
+                    "description": "The dot product depends only on the relative distance $n-m$, allowing generalization to extreme lengths. [32]"
+                },
+                {
+                    "type": "callout",
+                    "style": "warning",
+                    "title": "Position ID Resets",
+                    "content": "In multipacking, Conversation B must reset its first token to **Position ID 0**. Failure to reset causes the model to perceive a massive gap, leading to dialogue incoherence. [19]"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s4-8",
+            "heading": "4.8 Hardware Footprint: VRAM and Bandwidth Analysis",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": "The SFT runbook is ultimately constrained by GPU VRAM. Total requirements are the sum of parameters, gradients, optimizer states, and activations. [36]"
+                },
+                {
+                    "type": "equation",
+                    "label": "VRAM Approximation",
+                    "tex": "VRAM \\approx (2 + 2 + 12) \\cdot P + Activations",
+                    "description": "For a 7B model ($P=7$), this is ~112 GB for full fine-tuning (FFT). [13]"
+                },
+                {
+                    "type": "steps",
+                    "title": "VRAM Reduction Techniques",
+                    "items": [
+                        "**Gradient Checkpointing:** Recompute activations during backward pass to save 80% of activation memory. [39]",
+                        "**Mixed Precision (BF16):** Reduces master weight storage but requires careful scaling. [43]",
+                        "**Optimizer Sharding (ZeRO):** Distribute optimizer states across multiple GPUs in a cluster. [13]"
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "id": "s4-9",
+            "heading": "4.9 SFT Engineering Case Study: DeepSeek-V3 vs Llama 3.1",
+            "blocks": [
+                {
+                    "type": "comparison",
+                    "items": [
+                        {
+                            "title": "Llama 3.1 (405B)",
+                            "description": "4D Parallelism (Data, Tensor, Pipeline, Context) on BF16 mixed precision. [4]",
+                            "pros": [
+                                "Massive scale",
+                                "Standard stability"
+                            ],
+                            "cons": [
+                                "High memory consumption"
+                            ]
+                        },
+                        {
+                            "title": "DeepSeek-V3 (671B MoE)",
+                            "description": "Uses FP8 precision during training to reduce bandwidth requirements by 50%. [43]",
+                            "pros": [
+                                "Extreme efficiency",
+                                "Reasoning distillation (R1)"
+                            ],
+                            "cons": [
+                                "Complex MoE architecture [46]"
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "type": "text",
+                    "content": "**4.9.1 Reasoning Distillation**"
+                },
+                {
+                    "type": "text",
+                    "content": "DeepSeek-V3 fine-tunes on 800k reasoning samples distilled from a larger model. [42] They gradually extend context using **YaRN (Yet another RoPE extension)** to support 128k tokens. [3]"
+                }
+            ]
+        },
+        {
+            "type": "keyTakeaway",
+            "points": [
+                "**Label Masking** via `ignore_index=-100` ensures the model only learns from assistant responses, not user prompts.",
+                "**LoRA and QLoRA** reduce VRAM requirements by up to 90% by initializing low-rank adapters and quantizing base weights.",
+                "**Multipacking** and **FlashAttention-2** varlen functions double training throughput by eliminating padding overhead.",
+                "**Cut Cross-Entropy (CCE)** solves the memory bottleneck of large-vocabulary classification layers.",
+                "**RoPE** allows models to support 128k context lengths during SFT by relying on relative positional geometry."
+            ]
+        },
+        {
+            "type": "references",
+            "items": [
+                {
+                    "num": 1,
+                    "text": "chapter 4 gpt.pdf",
+                    "url": ""
+                },
+                {
+                    "num": 2,
+                    "text": "Hermes 3 Technical Report - arXiv",
+                    "url": "https://arxiv.org/pdf/2408.11857"
+                },
+                {
+                    "num": 3,
+                    "text": "DeepSeek V3 — Megatron Bridge - NVIDIA",
+                    "url": "https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/models/llm/deepseek-v3.html"
+                },
+                {
+                    "num": 4,
+                    "text": "Llama 3.1 — Analysis of Technical Specifications - Medium",
+                    "url": "https://krishna-yogik.medium.com/llama-3-1-analysis-of-the-technical-specifications-and-code-a8f2dcfc4863"
+                },
+                {
+                    "num": 5,
+                    "text": "Understanding and Using Supervised Fine-Tuning (SFT) for Language Models",
+                    "url": "https://cameronrwolfe.substack.com/p/understanding-and-using-supervised"
+                },
+                {
+                    "num": 6,
+                    "text": "ChatML vs Harmony: Understanding the new Format from OpenAI",
+                    "url": "https://huggingface.co/blog/kuotient/chatml-vs-harmony"
+                },
+                {
+                    "num": 7,
+                    "text": "CrossEntropyLoss - PyTorch Documentation",
+                    "url": "https://docs.pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html"
+                },
+                {
+                    "num": 8,
+                    "text": "Improved SFT for LLMs to Mitigate Forgetting - arXiv",
+                    "url": "https://arxiv.org/html/2506.09428v2"
+                },
+                {
+                    "num": 10,
+                    "text": "LIMA: Less Is More for Alignment - OpenReview",
+                    "url": "https://openreview.net/forum?id=KBMOKmX2he"
+                },
+                {
+                    "num": 11,
+                    "text": "Improved SFT for Large Language Models - arXiv",
+                    "url": "https://arxiv.org/abs/2506.09428"
+                },
+                {
+                    "num": 12,
+                    "text": "Catastrophic Forgetting in LLMs During Continual Fine-Tuning",
+                    "url": "https://www.researchgate.net/publication/395308608_An_Empirical_Study_of_Catastrophic_Forgetting_in_Large_Language_Models_During_Continual_Fine-Tuning"
+                },
+                {
+                    "num": 13,
+                    "text": "GPU Memory Requirements for LLMs: VRAM Calculator - Spheron",
+                    "url": "https://www.spheron.network/blog/gpu-memory-requirements-llm/"
+                },
+                {
+                    "num": 14,
+                    "text": "Evaluating LLM Fine-tuning Efficiency on Blackwell - Fixstars",
+                    "url": "https://blog.us.fixstars.com/evaluating-llm-fine-tuning-efficiency-on-nvidia-rtx-6000-blackwell-max-q/"
+                },
+                {
+                    "num": 15,
+                    "text": "No Code LLM Fine Tuning using Axolotl - Medium",
+                    "url": "https://medium.aiplanet.com/no-code-llm-fine-tuning-using-axolotl-2db34e3d0647"
+                },
+                {
+                    "num": 16,
+                    "text": "Complete Guide to GPU Requirements for SFT - Runpod",
+                    "url": "https://www.runpod.io/blog/llm-fine-tuning-gpu-guide"
+                },
+                {
+                    "num": 17,
+                    "text": "The Anatomy of LLM Fine-Tuning - Gautam Naik",
+                    "url": "https://www.gautamnaik.com/blog/llm-fine-tuning"
+                },
+                {
+                    "num": 18,
+                    "text": "Fine-Tuning Llama 3.1: Tailoring LLMs - Seaflux",
+                    "url": "https://www.seaflux.tech/blogs/llama-3.1-fine-tuning-supervised-technique/"
+                },
+                {
+                    "num": 19,
+                    "text": "Dynamic Batching vs. Sequence Packing - Medium",
+                    "url": "https://medium.com/better-ml/dynamic-batching-vs-sequence-packing-0ef4a3894dad"
+                },
+                {
+                    "num": 20,
+                    "text": "Training Efficiency Techniques: LoRA & Multipacking - Medium",
+                    "url": "https://medium.com/@siddharthtiwari01/training-efficiency-techniques-for-large-models-lora-optimizations-multipacking-and-cut-cross-f9c5a3976b11"
+                },
+                {
+                    "num": 21,
+                    "text": "Eliminating Packing-Aware Masking via LoRA-Based SFT - MDPI",
+                    "url": "https://www.mdpi.com/2227-7390/13/20/3344"
+                },
+                {
+                    "num": 22,
+                    "text": "Block-Sparse FlashAttention (BSFA) - Emergent Mind",
+                    "url": "https://www.emergentmind.com/topics/block-sparse-flashattention-bsfa"
+                },
+                {
+                    "num": 23,
+                    "text": "FlashMask Flexible Attention Mask - PaddleNLP",
+                    "url": "https://paddlenlp.readthedocs.io/en/latest/llm/docs/flashmask.html"
+                },
+                {
+                    "num": 24,
+                    "text": "Kvax: Flash Attention for JAX - Nebius",
+                    "url": "https://nebius.com/blog/posts/kvax-open-source-flash-attention-for-jax"
+                },
+                {
+                    "num": 25,
+                    "text": "torch.nn.attention.varlen - PyTorch Docs",
+                    "url": "https://docs.pytorch.org/docs/stable/nn.attention.varlen.html"
+                },
+                {
+                    "num": 26,
+                    "text": "Gemma 3 support for packed sequence training - Google Dev",
+                    "url": "https://discuss.ai.google.dev/t/gemma-3-support-for-packed-sequence-training-with-flashattention-2/114172"
+                },
+                {
+                    "num": 27,
+                    "text": "Cut Your Losses in Large-Vocab Models - OpenReview",
+                    "url": "https://openreview.net/forum?id=E4Fk3YuG56"
+                },
+                {
+                    "num": 28,
+                    "text": "Chronicals: Framework for LLM SFT - arXiv",
+                    "url": "https://arxiv.org/html/2601.02609v1"
+                },
+                {
+                    "num": 29,
+                    "text": "apple/ml-cross-entropy - GitHub",
+                    "url": "https://github.com/apple/ml-cross-entropy"
+                },
+                {
+                    "num": 30,
+                    "text": "Chronicals SFT Speedup over Unsloth - ResearchGate",
+                    "url": "https://www.researchgate.net/publication/399522458_Chronicals_A_High-Performance_Framework_for_LLM_Fine-Tuning_with_351x_Speedup_over_Unsloth"
+                },
+                {
+                    "num": 31,
+                    "text": "Barebone Implementation of Transformer Components - Medium",
+                    "url": "https://medium.com/@katherineolowookere/barebone-implementation-of-every-transformer-component-9d7ab56aa9e2"
+                },
+                {
+                    "num": 32,
+                    "text": "RoPE: Detailed Example - Towards AI",
+                    "url": "https://towardsai.net/p/machine-learning/rope-rotary-position-embeddings-a-detailed-example"
+                },
+                {
+                    "num": 33,
+                    "text": "Achieving Longer Inputs in LLMs with RoPE - Medium",
+                    "url": "https://medium.com/@simon.palma/rope-achieving-long-context-understanding-in-llms-e5186ccff362"
+                },
+                {
+                    "num": 34,
+                    "text": "Decoding RoPE: Secret Sauce for Transformers - Medium",
+                    "url": "https://medium.com/@DataDry/decoding-rotary-positional-embeddings-rope-the-secret-sauce-for-smarter-transformers-193cbc01e4ed"
+                },
+                {
+                    "num": 35,
+                    "text": "Enhancing Training Efficiency Using Packing - arXiv.org",
+                    "url": "https://arxiv.org/html/2407.09105v5"
+                },
+                {
+                    "num": 36,
+                    "text": "VRAM requirements for fine-tuning LLMs - Dataoorts",
+                    "url": "https://dataoorts.com/vram-requirements-for-fine-tuning-llms-ai-models/"
+                },
+                {
+                    "num": 37,
+                    "text": "Estimate GPU memory for PAI-Alibaba Cloud",
+                    "url": "https://www.alibabacloud.com/help/en/pai/getting-started/estimation-of-the-required-video-memory-for-the-model"
+                },
+                {
+                    "num": 38,
+                    "text": "Estimating GPU Memory Demands for Training LLMs - Medium",
+                    "url": "https://medium.com/@maxshapp/understanding-and-estimating-gpu-memory-demands-for-training-llms-in-practise-c5ef20a4baff"
+                },
+                {
+                    "num": 39,
+                    "text": "VRAM Requirements for LLMs - Hyperstack",
+                    "url": "https://www.hyperstack.cloud/blog/case-study/how-much-vram-do-you-need-for-llms"
+                },
+                {
+                    "num": 40,
+                    "text": "How to calculate VRAM usage during fine-tuning - Reddit",
+                    "url": "https://www.reddit.com/r/MachineLearning/comments/1flnxtg/d_how_to_calculate_vram_usage_of_a_llm_model/"
+                },
+                {
+                    "num": 41,
+                    "text": "Analysis of DeepSeek v3 and Llama 3 - cd ~",
+                    "url": "https://praneet.sh/deepseek/"
+                },
+                {
+                    "num": 42,
+                    "text": "Complete Guide to DeepSeek Models - BentoML",
+                    "url": "https://www.bentoml.com/blog/the-complete-guide-to-deepseek-models-from-v3-to-r1-and-beyond"
+                },
+                {
+                    "num": 43,
+                    "text": "DeepSeek-V3 Open-Sources 671B MoE LLM - InfoQ",
+                    "url": "https://www.infoq.com/news/2025/01/deepseek-v3-llm/"
+                },
+                {
+                    "num": 44,
+                    "text": "DeepSeek-V3 Training Cost vs Llama 3.1 - apxml",
+                    "url": "https://apxml.com/posts/training-cost-deepseek-v3-vs-llama-3"
+                },
+                {
+                    "num": 45,
+                    "text": "DeepSeek-V3 Technical Report - arXiv",
+                    "url": "https://arxiv.org/html/2412.19437v1"
+                },
+                {
+                    "num": 46,
+                    "text": "DeepSeek-V3 Technical Report (v2) - arXiv.org",
+                    "url": "https://arxiv.org/html/2412.19437v2"
+                },
+                {
+                    "num": 47,
+                    "text": "Data Story: Synthetic Pipelines in Deepseek V3.2",
+                    "url": "https://kili-technology.com/blog/data-story-deepseek-v3-2"
+                },
+                {
+                    "num": 48,
+                    "text": "Transformer FLOPs - Adam Casson",
+                    "url": "https://www.adamcasson.com/posts/transformer-flops"
+                }
+            ]
+        }
+    ]
+}

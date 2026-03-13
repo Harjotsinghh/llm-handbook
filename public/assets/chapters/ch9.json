@@ -1,0 +1,623 @@
+{
+  "id": "ch9",
+  "title": "9. The Architectural Evolution of Large Language Models",
+  "subtitle": "A Comprehensive Analysis of Alignment, Inference Engineering, and High-Performance Infrastructure in 2026",
+  "icon": "🏗️",
+  "color": "#14b8a6",
+  "sections": [
+    {
+      "type": "intro",
+      "heading": "The Pivot Toward Deep Alignment",
+      "body": "The progression of generative artificial intelligence has moved definitively beyond the era of simple next-token prediction. By the first quarter of 2026, the industry has pivoted toward a paradigm where alignment—the process of ensuring model behavior reflects human preference, safety, and utility—is the primary focus of development. [1] This transition is underpinned by the widespread adoption of Direct Preference Optimization (DPO), a methodology that has replaced the unstable and computationally burdensome Reinforcement Learning from Human Feedback (RLHF) with a stable, closed-form classification objective. [3] Simultaneously, the engineering of large-scale serving systems has evolved, with inference engines like vLLM now managing complex multi-adapter ecosystems that allow single base models to support thousands of specialized tasks. [6] This technological shift is occurring within a rapidly changing geopolitical and physical infrastructure landscape, most notably exemplified by India's emergence as a sovereign AI hub powered by massive NVIDIA Blackwell superclusters. [8]"
+    },
+    {
+      "type": "section",
+      "id": "s9-1",
+      "heading": "1. Mathematical Foundations of Indirect Reward Modeling and Policy Alignment",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The fundamental challenge of modern large language model (LLM) training is the \"alignment gap\"—the distance between a model’s statistical likelihood of a token and a human’s qualitative preference for a response. [5] While Supervised Fine-Tuning (SFT) provides a model with the basic conversational structure, it lacks the intuition, conciseness, and robust safety guardrails required for production deployment. [12] Direct Preference Optimization addresses this by bypassing the need for an explicit reward model. [3]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s9-1-1",
+      "heading": "1.1 The Bradley-Terry Model and DPO Derivation",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The theoretical core of DPO rests on the assumption that preference data follows the Bradley-Terry (BT) model. [3] In this framework, for a given prompt $x$ and two candidate responses $y_w$ (winning/preferred) and $y_l$ (losing/rejected), the probability that a human prefers $y_w$ over $y_l$ is modeled by the relative difference in their latent rewards [3]:"
+        },
+        {
+          "type": "equation",
+          "label": "Bradley-Terry Framework Objective",
+          "tex": "p(y_w > y_l | x) = \\frac{\\exp(r^*(x, y_w))}{\\exp(r^*(x, y_w)) + \\exp(r^*(x, y_l))}",
+          "description": "Latent scoring mechanism for preferential text scaling."
+        },
+        {
+          "type": "text",
+          "content": "This ratio of exponentials can be mathematically simplified into the sigmoid function $\\sigma$, yielding the standard preference probability [3]:"
+        },
+        {
+          "type": "equation",
+          "label": "Sigmoid Log Ratio",
+          "tex": "p(y_w > y_l | x) = \\sigma(r^*(x, y_w) - r^*(x, y_l))",
+          "description": "Simpler exponential mapping."
+        },
+        {
+          "type": "text",
+          "content": "The innovation of DPO is identifying that the optimal policy $\\pi^∗$ for a given reward function $r(x,y)$—under a Kullback-Leibler (KL) divergence constraint to prevent the model from deviating too far from its original reference state—can be solved in closed form. [3] By solving the constrained optimization problem using Lagrange multipliers, researchers have shown that the reward function can be expressed purely in terms of the log-ratio between the training policy $\\pi_\\theta$ and the reference policy $\\pi_{ref}$ [3]:"
+        },
+        {
+          "type": "equation",
+          "label": "Optimal Reward Derivation",
+          "tex": "r(x, y) = \\beta \\log \\frac{\\pi_\\theta(y|x)}{\\pi_{ref}(y|x)} + \\beta \\log Z(x)",
+          "description": "DPO mechanism to substitute the Reward Network mathematically."
+        },
+        {
+          "type": "text",
+          "content": "Substituting this into the Bradley-Terry objective leads to the standard DPO loss:"
+        },
+        {
+          "type": "equation",
+          "label": "DPO Objective Loss",
+          "tex": "\\mathcal{L}_{DPO}(\\pi_\\theta ; \\pi_{ref}) = -\\mathbb{E}_{(x, y_w, y_l)} \\left[ \\log \\sigma \\left( \\beta \\log \\frac{\\pi_\\theta(y_w | x)}{\\pi_{ref}(y_w | x)} - \\beta \\log \\frac{\\pi_\\theta(y_l | x)}{\\pi_{ref}(y_l | x)} \\right) \\right]",
+          "description": "Stable classification objective replacing volatile PPO models."
+        },
+        {
+          "type": "text",
+          "content": "The hyperparameter $\\beta$ acts as a temperature scaling factor that dictates the strength of the KL penalty. [2] Values between 0.05 and 0.5 are standard. [2]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s9-1-2",
+      "heading": "1.2 Post-DPO Loss Variants",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "By 2026, several refinements to the standard DPO loss have emerged to address limitations like \"reward hacking,\" where a model learns to exploit artifacts in the preference data to achieve higher log-probabilities without improving quality. [17]"
+        },
+        {
+          "type": "table",
+          "title": "Modern Alignment Loss Functions",
+          "headers": ["Loss Variant", "Objective Characteristics", "Primary Advantage"],
+          "rows": [
+            ["IPO", "Identity-based transform of the preference margin", "Prevents overfitting to the preference pairs and maintains log-likelihood stability. [4]"],
+            ["SimPO", "Reference-free margin optimization using length-normalized log-probs", "Reduces VRAM by removing the frozen reference model; often achieves better AlpacaEval 2 scores. [17]"],
+            ["ORPO", "Odds-ratio based normalization directly in the SFT stage", "Bypasses the reference model and handles imbalanced preference data effectively. [19]"],
+            ["KTO", "Binary cross-entropy on unpaired data points", "Applicable when only binary \"good\" or \"bad\" labels are available instead of pairs. [21]"],
+            ["CPO", "Contrastive preference optimization for translation tasks", "High efficiency for sequence-to-sequence alignment. [19]"]
+          ]
+        },
+        {
+          "type": "text",
+          "content": "The rise of SimPO is particularly noteworthy in the 2026 landscape. By eliminating the reference model, it significantly reduces the memory overhead of the alignment phase, making the process more accessible for massive models where loading a second copy for reference log-probabilities would exceed GPU memory. [20]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s9-2",
+      "heading": "2. Data-Centric Alignment: The Shift Toward Precision Curation",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "A consensus among researchers in 2026 is that the quality of the preference dataset is the *single most important factor* in the success of DPO. [1] Early datasets like UltraFeedback provided the foundation, but high-performance models now require more sophisticated curation strategies. [1]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s9-2-1",
+      "heading": "2.1 Preference Divergence and Conflict Management",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Large-scale datasets often contain \"preference conflicts,\" where different aspect-specific scores (e.g., helpfulness vs. safety) contradict each other. [1] Modern training pipelines now employ \"Preference Divergence\" (PD) as a metric to quantify these inter-aspect conflicts. [1] Strategies that identify and select a subset of data (as little as 30%) with the most negative PD values have shown consistent performance improvements over using the full dataset. [1] This \"less is more\" approach mitigates noise and ensures the gradient updates are consistent across all alignment criteria."
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s9-2-2",
+      "heading": "2.2 Margin-Maximization and Bayesian Aggregation",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "To address \"parameter shrinkage\" caused by noisy data, newer alignment methods utilize margin-maximization principles for dataset curation. [24] Bayesian Aggregation is now used to unify multiple reward sources—both internal model log-probs and external reward model scores—into a single preference probability. [24]"
+        },
+        {
+          "type": "table",
+          "title": "Dataset Utility Curation Options",
+          "headers": ["Metric / Approach", "Impact on Training", "Efficiency"],
+          "rows": [
+            ["Truncated Influence Function (TIF)", "Measures the impact of an individual data point on validation loss", "Identifies and removes \"toxic\" preference pairs that harm specific model architectures. [23]"],
+            ["Bayesian Aggregation", "Merges margin sources from disparate reward models", "Improves data efficiency; achieves 3-8% AlpacaEval improvements with 10% of data. [24]"],
+            ["PD-based Selection", "Filters high-conflict samples across aspect-specific scores", "Enables robust training on aggregated datasets with high internal noise. [1]"]
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s9-3",
+      "heading": "3. Parameter-Efficient Fine-Tuning: Scaling the LoRA Ecosystem",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "As the parameter counts of frontier models continue to climb, full-parameter fine-tuning has become an edge-case reserved only for well-funded research labs. [28] Parameter-Efficient Fine-Tuning (PEFT), specifically Low-Rank Adaptation (LoRA), has matured from an experimental technique to the production standard. [30]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s9-3-1",
+      "heading": "3.1 The Mechanics of Low-Rank Decomposition",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "LoRA hypothesizes that the weight updates $\\Delta W$ in a transformer layer have an \"intrinsic rank\" that is much lower than the actual dimension of the weight matrix. [33] For a frozen pre-trained weight matrix $W_0 \\in \\mathbb{R}^{d \\times k}$, LoRA models the update as the product of two trainable low-rank matrices $B \\in \\mathbb{R}^{d \\times r}$ and $A \\in \\mathbb{R}^{r \\times k}$, where $r \\ll \\min(d, k)$. [33] The modified forward pass $h$ is:"
+        },
+        {
+          "type": "equation",
+          "label": "LoRA Mathematical Decomposition",
+          "tex": "h = W_0 x + \\frac{\\alpha}{r} BAx",
+          "description": "A rank-stabilized dimensional substitution for forward pass."
+        },
+        {
+          "type": "text",
+          "content": "The scaling factor $\\alpha/r$ is critical for maintaining stability across different rank selections. [36] In 2026, the heuristic of setting $\\alpha = 2r$ remains common for aggressive learning, while the introduction of Rank-Stabilized LoRA (rsLoRA) suggests a scaling of $\\alpha / \\sqrt{r}$ for theoretically optimal convergence. [36]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s9-3-2",
+      "heading": "3.2 Breaking Changes: Fused MoE Architectures",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The release of Transformers 5.x and vLLM 0.17.x introduced significant changes in how Mixture of Experts (MoE) models are structured. [38] In previous iterations, experts were discrete `nn.Linear` layers. In the 2026 architecture, experts are fused into single modules with stacked `nn.Parameter` tensors. [38]"
+        },
+        {
+          "type": "text",
+          "content": "This shift has created technical friction. Standard PEFT `target_modules` cannot target individual experts in a fused tensor. [38] Users must now utilize `target_parameters` to directly inject adapters into the experts. However, PEFT restricts the creation of multiple adapters when `target_parameters` is used, forcing a move toward reference-free methods like SimPO for MoE models. [38]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s9-4",
+      "heading": "4. Inference Engineering: The Architecture of Production Serving",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "Serving LLMs requires more than raw compute; it requires an orchestration layer capable of managing the dynamic interplay between base models and adapters. [6] vLLM has become the industry standard for this task."
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s9-4-1",
+      "heading": "4.1 Multi-LoRA Serving and Expert Routing",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "In a production environment, a single high-performance base model might serve dozens of different applications using specific LoRA adapters. [6] vLLM’s multi-LoRA architecture allows these adapters to share the same GPU memory, swapping them in and out per request with minimal overhead. [6]"
+        },
+        {
+          "type": "text",
+          "content": "For MoE models, this creates a \"compound sparsity\" challenge. Each input token is routed to a subset of experts, and each expert must have the correct adapter weights applied. The `fused_moe_lora` kernel handles this by adding a dimension to the computational grid specifically for the active adapters. [6]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s9-5",
+      "heading": "5. The 2026 Model Landscape: Proprietary vs. Open-Weight",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The competitive landscape of 2026 is defined by a rapid convergence in performance between closed-source giants and open-weight community models. [45]"
+        },
+        {
+          "type": "table",
+          "title": "Open Weight 2026 Landscape",
+          "headers": ["Model Family", "Key 2026 Variant", "Architectural Highlights"],
+          "rows": [
+            ["Meta Llama 4", "Llama 4 Maverick", "17B active parameters; MoE structure; 1M context window. [45]"],
+            ["Alibaba Qwen 3", "Qwen 3 235B 2507", "235B total / 22B active; 128 experts; native 262k context. [45]"],
+            ["DeepSeek", "DeepSeek V3.2", "High reasoning efficiency; specialized in math and logic. [50]"],
+            ["Microsoft Phi", "Phi-4", "Optimized for high performance in the 3B-15B parameter range. [45]"]
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s9-6",
+      "heading": "6. High-Performance Infrastructure and Compute Regionalization",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The physical infrastructure underpinning AI is undergoing a significant geographic rebalancing. While North America remains the leader in total capacity, the \"Sovereign AI\" push has made India the fastest-growing market for high-performance compute. [10]"
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "s9-6-1",
+      "heading": "6.1 India's Infrastructure Hubs",
+      "blocks": [
+        {
+          "type": "text",
+          "content": "The Indian government has treated digital infrastructure as national economic infrastructure to ensure data sovereignty under the DPDP Act. [10] Yotta Data Services has announced a $2 billion investment to develop \"Shakti Cloud,\" powered by 20,736 NVIDIA Blackwell Ultra GPUs, designed to support the training of trillion-parameter models. [9]"
+        },
+        {
+          "type": "table",
+          "title": "Indian Sovereign AI Superclusters",
+          "headers": ["Provider", "Data Center Locations (India)", "Key GPU Offerings (2026)"],
+          "rows": [
+            ["E2E Networks", "Delhi NCR, Mumbai, Bangalore", "B200, H200, H100, A100. [55]"],
+            ["Yotta", "Noida (Greater Noida), Navi Mumbai", "Blackwell Ultra, H100. [8]"],
+            ["CtrlS", "Hyderabad, Mumbai, Bangalore, Noida", "Private GPU Cloud for AI Training. [58]"],
+            ["Cyfuture", "Domestic Indian hubs", "H100 Enterprise Infrastructure. [61]"]
+          ]
+        }
+      ]
+    },
+    {
+      "type": "keyTakeaway",
+      "points": [
+        "**SimPO vs DPO:** In MoE models, loading reference parameters causes massive VRAM issues. Opt to use SimPO as it completely hacks away the Reference Model during Alignment! [20]",
+        "**Mixture of Experts Fused Linear Constraint:** You **cannot** apply normal target-module PEFT loading to 2026 MoE iterations because the experts live in single fused `nn.Parameter` tensors. You must use `target_parameters`. [38]",
+        "**vLLM Compound Sparsity Routing:** You can inject massive arrays of individual LoRAs to vLLM on a single inference base container and the `fused_moe_lora` grid handles dynamic expert injection completely automatically! [6]",
+        "**Sovereign Scale:** Due to DPDP limitations, you should look towards India's booming Sovereign Compute scaling grids to get native H200 and Blackwell servers outside GCP/Amazon! [10]"
+      ]
+    },
+    {
+      "type": "references",
+      "items": [
+        {
+          "num": 1,
+          "text": "Data Selection for LLM Alignment Using Fine-Grained Preferences - arXiv",
+          "url": "https://arxiv.org/html/2508.07638v2"
+        },
+        {
+          "num": 2,
+          "text": "Direct Preference Optimization: A Technical Deep Dive - Together AI",
+          "url": "https://www.together.ai/blog/direct-preference-optimization"
+        },
+        {
+          "num": 3,
+          "text": "Deriving the DPO Loss from First Principles - Hugging Face",
+          "url": "https://huggingface.co/blog/garg-aayush/derive-dpo-loss"
+        },
+        {
+          "num": 4,
+          "text": "DPO Trainer - Hugging Face",
+          "url": "https://huggingface.co/docs/trl/dpo_trainer"
+        },
+        {
+          "num": 5,
+          "text": "Fine-tune a Mistral-7b model with Direct Preference Optimization | by Maxime Labonne",
+          "url": "https://medium.com/data-science/fine-tune-a-mistral-7b-model-with-direct-preference-optimization-708042745aac"
+        },
+        {
+          "num": 6,
+          "text": "Efficiently serve dozens of fine-tuned models with vLLM on Amazon ...",
+          "url": "https://blog.vllm.ai/2026/02/26/multi-lora.html"
+        },
+        {
+          "num": 7,
+          "text": "Deploy multi-LoRA adapters on LLMs - Anyscale Docs",
+          "url": "https://docs.anyscale.com/llm/serving/multi-lora"
+        },
+        {
+          "num": 8,
+          "text": "Yotta to build AI computing hub in India with Nvidia chips - Capacity",
+          "url": "https://capacityglobal.com/news/yotta-nvidia-ai-compute-hub-india-chip-revolution/"
+        },
+        {
+          "num": 9,
+          "text": "Yotta to build US$2 billion AI hub in India with Nvidia chips - iTnews Asia",
+          "url": "https://www.itnews.asia/news/yotta-to-build-us2-billion-ai-hub-in-india-with-nvidia-chips-623718"
+        },
+        {
+          "num": 10,
+          "text": "India's Trillion-Dollar Data Center Opportunity & AI - Ctrls",
+          "url": "https://www.ctrls.com/blogs-india-ai-data-center-trillion-dollar-opportunity/"
+        },
+        {
+          "num": 11,
+          "text": "Fine-tuning open LLM judges to outperform GPT-5.2 - Together AI",
+          "url": "https://www.together.ai/blog/fine-tuning-open-llm-judges-to-outperform-gpt-5-2"
+        },
+        {
+          "num": 12,
+          "text": "chapter 9.pdf",
+          "url": ""
+        },
+        {
+          "num": 13,
+          "text": "0xallam/Direct-Preference-Optimization: Direct Preference ... - GitHub",
+          "url": "https://github.com/0xallam/Direct-Preference-Optimization"
+        },
+        {
+          "num": 14,
+          "text": "Beyond Bradley-Terry Models: A General Preference Model for Language Model Alignment",
+          "url": "https://arxiv.org/html/2410.02197v2"
+        },
+        {
+          "num": 15,
+          "text": "Deriving the DPO Loss from First Principles - Aayush Garg",
+          "url": "https://aayushgarg.dev/posts/2025-12-30-deriving-dpo-loss.html"
+        },
+        {
+          "num": 16,
+          "text": "Direct Preference Optimization Explained In-depth - Tyler Romero",
+          "url": "https://www.tylerromero.com/posts/2024-04-dpo/"
+        },
+        {
+          "num": 17,
+          "text": "Stable Preference Optimization: A Bilevel Approach to Catastrophic Preference Shift - arXiv",
+          "url": "https://arxiv.org/html/2507.07723"
+        },
+        {
+          "num": 18,
+          "text": "Weights-Rotated Preference Optimization for Large Language Models - arXiv",
+          "url": "https://arxiv.org/html/2508.17637v1"
+        },
+        {
+          "num": 19,
+          "text": "Small-Margin Preferences Still Matter\u2014If You Train Them Right - arXiv.org",
+          "url": "https://arxiv.org/html/2602.00954v1"
+        },
+        {
+          "num": 20,
+          "text": "Pre-DPO: Improving Data Utilization in Direct Preference Optimization Using a Guiding Reference Model - arXiv",
+          "url": "https://arxiv.org/pdf/2504.15843"
+        },
+        {
+          "num": 21,
+          "text": "DPO Isn't Enough: The Modern Post-Training Stack \u2014 SimPO, ORPO, KTO and Beyond | by James Fahey | Medium",
+          "url": "https://medium.com/@fahey_james/dpo-isnt-enough-the-modern-post-training-stack-simpo-orpo-kto-and-beyond-d82e52a1ee6c"
+        },
+        {
+          "num": 22,
+          "text": "Dataset formats and types - Hugging Face",
+          "url": "https://huggingface.co/docs/trl/en/dataset_formats"
+        },
+        {
+          "num": 23,
+          "text": "Towards Understanding Valuable Preference Data for Large Language Model Alignment",
+          "url": "https://arxiv.org/html/2510.13212v1"
+        },
+        {
+          "num": 24,
+          "text": "[2502.14560] Less is More: Improving LLM Alignment via Preference Data Selection - arXiv",
+          "url": "https://arxiv.org/abs/2502.14560"
+        },
+        {
+          "num": 25,
+          "text": "README.md \u00b7 HuggingFaceH4/ultrafeedback_binarized at main",
+          "url": "https://huggingface.co/datasets/HuggingFaceH4/ultrafeedback_binarized/blob/main/README.md"
+        },
+        {
+          "num": 26,
+          "text": "DPO Trainer - Hugging Face",
+          "url": "https://huggingface.co/docs/trl/v0.12.2/dpo_trainer"
+        },
+        {
+          "num": 27,
+          "text": "Less is More: Improving LLM Alignment via Preference Data Selection - arXiv",
+          "url": "https://arxiv.org/html/2502.14560v4"
+        },
+        {
+          "num": 28,
+          "text": "Fine-Tuning Infrastructure: LoRA, QLoRA, and PEFT at Scale | Introl Blog",
+          "url": "https://introl.com/blog/fine-tuning-infrastructure-lora-qlora-peft-scale-guide-2025"
+        },
+        {
+          "num": 29,
+          "text": "Parameter-Efficient Fine-Tuning (PEFT) \u2014 Megatron Bridge - NVIDIA Documentation",
+          "url": "https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/training/peft.html"
+        },
+        {
+          "num": 30,
+          "text": "PEFT - Hugging Face",
+          "url": "https://huggingface.co/docs/peft/index"
+        },
+        {
+          "num": 31,
+          "text": "peft - PyPI",
+          "url": "https://pypi.org/project/peft/"
+        },
+        {
+          "num": 32,
+          "text": "What is parameter-efficient fine-tuning (PEFT)? - IBM",
+          "url": "https://www.ibm.com/think/topics/parameter-efficient-fine-tuning"
+        },
+        {
+          "num": 33,
+          "text": "Understanding LoRA \u2014 Low Rank Adaptation For Finetuning Large Models - Medium",
+          "url": "https://medium.com/data-science/understanding-lora-low-rank-adaptation-for-finetuning-large-models-936bce1a07c6"
+        },
+        {
+          "num": 34,
+          "text": "Understanding LoRA-derived Techniques for Optimal LLM Fine-tuning",
+          "url": "https://www.dailydoseofds.com/understanding-lora-derived-techniques-for-optimal-llm-fine-tuning/"
+        },
+        {
+          "num": 35,
+          "text": "Fundamentals of LoRA and low\u2011rank fine-tuning - Nebius",
+          "url": "https://nebius.com/blog/posts/fine-tuning/lora-low-rank-adaptation"
+        },
+        {
+          "num": 36,
+          "text": "LoRA fine-tuning Hyperparameters Guide | Unsloth Documentation",
+          "url": "https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide"
+        },
+        {
+          "num": 37,
+          "text": "LoRA Merging with SVD: Understanding Interference and Preserving Performance - OpenReview",
+          "url": "https://openreview.net/pdf?id=t9FrMviTaP"
+        },
+        {
+          "num": 38,
+          "text": "DPOTrainer ref adapter crashes with PEFT `target_parameters` (MoE models on Transformers 5.x) \u00b7 Issue #5222 \u00b7 huggingface/trl - GitHub",
+          "url": "https://github.com/huggingface/trl/issues/5222"
+        },
+        {
+          "num": 39,
+          "text": "vllm-project/vllm v0.17.0 on GitHub - NewReleases.io",
+          "url": "https://newreleases.io/project/github/vllm-project/vllm/release/v0.17.0"
+        },
+        {
+          "num": 40,
+          "text": "The Complete Guide to GPU Requirements for LLM Fine-Tuning | Runpod Blog",
+          "url": "https://www.runpod.io/blog/llm-fine-tuning-gpu-guide"
+        },
+        {
+          "num": 41,
+          "text": "Efficiently Deploying LoRA Adapters: Optimizing LLM Fine-Tuning for Multi-Task AI",
+          "url": "https://www.inferless.com/learn/how-to-serve-multi-lora-adapters"
+        },
+        {
+          "num": 42,
+          "text": "LoRA Adapters - vLLM",
+          "url": "https://docs.vllm.ai/en/stable/features/lora.html"
+        },
+        {
+          "num": 43,
+          "text": "Quickstart - vLLM",
+          "url": "https://docs.vllm.ai/en/latest/getting_started/quickstart/"
+        },
+        {
+          "num": 44,
+          "text": "Architecture Overview - vLLM",
+          "url": "https://docs.vllm.ai/en/latest/design/arch_overview.html"
+        },
+        {
+          "num": 45,
+          "text": "The best large language models (LLMs) in 2026 - Zapier",
+          "url": "https://zapier.com/blog/best-llm/"
+        },
+        {
+          "num": 46,
+          "text": "Top open-source LLM models in 2026 - Kairntech",
+          "url": "https://kairntech.com/blog/articles/top-open-source-llm-models-in-2026/"
+        },
+        {
+          "num": 47,
+          "text": "9 Top Open-Source LLMs for 2026 and Their Uses - DataCamp",
+          "url": "https://www.datacamp.com/blog/top-open-source-llms"
+        },
+        {
+          "num": 48,
+          "text": "The 10 Most Widely Used LLMs Currently in 2026 | by Carlos Eduardo Olivieri - Medium",
+          "url": "https://medium.com/@higher-order-programmer/the-10-most-widely-used-llms-currently-in-2026-d83c15e1a2db"
+        },
+        {
+          "num": 49,
+          "text": "Top 50+ Large Language Models (LLMs) in 2026 - Exploding Topics",
+          "url": "https://explodingtopics.com/blog/list-of-llms"
+        },
+        {
+          "num": 50,
+          "text": "Best LLM Models 2026: Performance Rankings and Features - ContentRare Blog",
+          "url": "https://blog.contentrare.ai/best-llm-models-2026-performance-rankings-and-features-1813/"
+        },
+        {
+          "num": 51,
+          "text": "DeepSeek further improves LLM training \u2014 Weekly AI Newsletter (January 7th 2026) | by Fabio Chiusano - Medium",
+          "url": "https://medium.com/nlplanet/deepseek-further-improves-llm-training-weekly-ai-newsletter-january-7th-2026-5a46e26d42b7"
+        },
+        {
+          "num": 52,
+          "text": "India Data Center GPU Market Research Report: Forecast (2026-2032) - MarkNtel Advisors",
+          "url": "https://www.marknteladvisors.com/research-library/data-center-gpu-market-india.html"
+        },
+        {
+          "num": 53,
+          "text": "Indian firm Yotta to build $2 billion data centre with Nvidia's Blackwell chips \u2014 one of Asia's largest AI hubs | Company Business News - Mint",
+          "url": "https://www.livemint.com/companies/news/indian-firm-yotta-to-build-2-billion-data-centre-with-nvidias-blackwell-chips-one-of-asias-largest-ai-hubs-11771389615200.html"
+        },
+        {
+          "num": 54,
+          "text": "Indian data center firm Yotta to build $2b Nvidia-powered AI hub - Tech in Asia",
+          "url": "https://www.techinasia.com/news/indian-data-center-firm-yotta-to-build-2b-nvidia-powered-ai-hub"
+        },
+        {
+          "num": 55,
+          "text": "GPU Cloud India | Rent NVIDIA GPUs from Rs49/hr | E2E Networks",
+          "url": "https://www.e2enetworks.com/gpu-cloud"
+        },
+        {
+          "num": 56,
+          "text": "A100 GPU Cloud India - E2E Networks",
+          "url": "https://www.e2enetworks.com/cloud-terms/gpu/a100-cloud-india"
+        },
+        {
+          "num": 57,
+          "text": "High-Density, AI-Ready Data Center Infrastructure | CtrlS",
+          "url": "https://www.ctrls.com/ai-ready-datacenter-infrastructure/"
+        },
+        {
+          "num": 58,
+          "text": "Asia's Largest Rated-4 Data Center Network | CtrlS",
+          "url": "https://www.ctrls.com/"
+        },
+        {
+          "num": 59,
+          "text": "List of Top 15 Largest Data Center Companies in India [February 2026]",
+          "url": "https://www.blackridgeresearch.com/blog/list-of-top-ten-largest-data-center-companies-in-india"
+        },
+        {
+          "num": 60,
+          "text": "GPU Private Cloud for AI & ML Workloads - Ctrls",
+          "url": "https://www.ctrls.com/gpu-private-cloud-for-ai/"
+        },
+        {
+          "num": 61,
+          "text": "NVIDIA H100 GPU Provider in India | Cyfuture Cloud",
+          "url": "https://cyfuture.cloud/blog/top-10-nvidia-h100-gpu-provider-in-india/"
+        },
+        {
+          "num": 62,
+          "text": "NVIDIA H100 GPU Price in India | Rent H100 80GB | From \u20b9249/hr | E2E Networks",
+          "url": "https://www.e2enetworks.com/gpus/nvidia-h100"
+        },
+        {
+          "num": 63,
+          "text": "GPU Cloud Benchmarks 2026: Real Performance and Pricing Data Across Every Major Provider | Spheron Blog",
+          "url": "https://www.spheron.network/blog/gpu-cloud-benchmarks/"
+        },
+        {
+          "num": 64,
+          "text": "NVIDIA H100 Pricing (February 2026): Cheapest On-Demand Cloud GPU Rates",
+          "url": "https://www.thundercompute.com/blog/nvidia-h100-pricing"
+        },
+        {
+          "num": 65,
+          "text": "NVIDIA H100 GPU: Next-Gen AI and HPC Performance",
+          "url": "https://www.tatacommunications.com/knowledge-base/cloud-ai/nvidia-h100-gpu"
+        },
+        {
+          "num": 66,
+          "text": "Top 12 Cloud GPU Providers for AI and Machine Learning in 2026 - Runpod",
+          "url": "https://www.runpod.io/articles/guides/top-cloud-gpu-providers"
+        },
+        {
+          "num": 67,
+          "text": "NVIDIA A100: Pricing, Availability, and Best Cloud Options (2026) - Fluence Network",
+          "url": "https://www.fluence.network/blog/nvidia-a100/"
+        }
+      ]
+    }
+  ]
+}
